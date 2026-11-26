@@ -445,3 +445,25 @@ textarea { width: 100%; color: var(--text); font: inherit; font-size: 16px; padd
   .adm-acts { width: 100%; justify-content: flex-start; padding-left: 50px; }
 }
 #banDlg { z-index: 38; }   /* поверх админ-панели */
+
+/* ================= Ограничения в комнате ================= */
+#rsDlg, #rbDlg { z-index: 38; }
+.dur-picker { margin-top: 14px; }
+.dur-picker .chips-select { margin-top: 0; }
+.dur-custom { display: flex; gap: 8px; justify-content: center; align-items: center; margin-top: 10px; animation: pf-fade .2s ease; }
+.dur-custom input { width: 90px; margin: 0; text-align: center; }
+.dur-custom select { width: auto; margin: 0; }
+.chips-select button[aria-checked="true"] { background: var(--red); border-color: var(--red); color: #fff; }
+.rs-seg { margin-top: 14px; }
+.rs-seg button { font-size: 13px; }
+.rs-hint { min-height: 2.8em; margin: 8px 0 0; }
+.pm-restricts { margin-top: 10px; display: grid; gap: 6px; }
+.pm-restrict { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 10px; font-size: 13px;
+  background: color-mix(in srgb, var(--red) 16%, var(--bg1)); }
+.pm-restrict span { flex: 1; }
+.pm-restrict button { border: 0; border-radius: 8px; padding: 4px 9px; background: var(--bg3); color: var(--text); font: inherit;
+  font-size: 12px; cursor: pointer; }
+.rb-list { padding: 0 16px; margin: 4px 0 6px; }
+.rb-hint { padding: 0 20px 18px; margin: 0; }
+.ctl.locked { opacity: .55; }
+.chat-form input:disabled { opacity: .6; }

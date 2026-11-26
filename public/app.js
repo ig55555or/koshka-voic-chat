@@ -57,6 +57,8 @@ const roster = new Map();    // id -> { name, admin, guest } (из сигнал�
 let account = null;          // { login, admin } или null — гость
 let myName = '', myFlags = null, myProfile = null;
 let profileWaiter = null;    // ждём подтверждения сохранения профиля в комнате
+let canModerate = false;     // я админ или создатель этой комнаты
+let myRestrict = { voice: 0, chat: 0 };   // мои ограничения: время окончания (мс), Infinity — навсегда
 let kicked = false;
 const roleMark = (r) => (r?.admin ? ' 👑' : r?.owner ? ' 🏠' : r?.guest ? ' · гость' : '');
 // у аккаунтов рядом с ником показываем логин — чтобы ником нельзя было выдать себя за другого
@@ -319,12 +321,17 @@ function connect(room, password) {
           location.reload();
           break;
         case 'joined':
+          applyMyRestrict.pending = true;
           myId = msg.id;
           myName = msg.name;
           myFlags = msg;
           myProfile = msg.profile || null;
+          canModerate = !!msg.canModerate;
+          myRestrict = restrictUntil(msg.restrict);
+          $('#btnRoomBans').hidden = !canModerate;
           resolve();
           for (const p of msg.peers) {
+            p.rs = restrictUntil(p.restrict);
             roster.set(p.id, p);
             const peer = createPeer(p.id, p.name, true);
             peer.state = p.state || {};
@@ -332,8 +339,18 @@ function connect(room, password) {
           renderUsers(); renderStage();
           break;
         case 'peer-joined':
+          msg.rs = restrictUntil(msg.restrict);
           roster.set(msg.id, msg);
           sysMsg(`${msg.name}${loginNote(msg)}${roleText(msg)} в комнате`); joinSound(true);
+          break;
+        case 'restrict':
+          onRestrict(msg);
+          break;
+        case 'restrictions':
+          renderRoomBans(msg.items || []);
+          break;
+        case 'restrictions-changed':
+          if (!$('#rbDlg').hidden) send({ type: 'restrictions' });
           break;
         case 'notice':
           sysMsg(String(msg.text || ''));
@@ -440,7 +457,7 @@ function createPeer(id, name, initiator) {
   p.dc.onmessage = (e) => {
     try {
       const m = JSON.parse(e.data);
-      if (m.type === 'chat' && typeof m.text === 'string') chatMsg(p.name, m.text.slice(0, 2000), false, roster.get(p.id)?.profile);
+      if (m.type === 'chat' && typeof m.text === 'string' && !isBlocked(roster.get(p.id)?.rs, 'chat')) chatMsg(p.name, m.text.slice(0, 2000), false, roster.get(p.id)?.profile);
     } catch {}
   };
 
@@ -569,7 +586,8 @@ function onTrack(p, e) {
 }
 
 function applyPeerVolume(p) {
-  p.gain.gain.value = p.localMute ? 0 : p.voice / 100;
+  const banned = isBlocked(roster.get(p.id)?.rs, 'voice');   // запрет голоса в комнате
+  p.gain.gain.value = p.localMute || banned ? 0 : p.voice / 100;
   p.screenGain.gain.value = p.localMute ? 0 : p.screen / 100;
 }
 
@@ -795,7 +813,9 @@ function renderUsers() {
     const f = document.createElement('span');
     f.className = 'flags';
     f.textContent = (st.camera ? '📷' : '') + (extra.localMute ? '🔕' : '') +
-      (st.deafened ? '🔇' : st.muted ? '🤐' : '') + (extra.connecting ? '⏳' : '');
+      (st.deafened ? '🔇' : st.muted ? '🤐' : '') + (extra.connecting ? '⏳' : '') +
+      (isBlocked(extra.me ? myRestrict : extra.role?.rs, 'voice') ? '🚫🎙️' : '') +
+      (isBlocked(extra.me ? myRestrict : extra.role?.rs, 'chat') ? '🚫💬' : '');
     li.append(f);
     li.addEventListener('click', (ev) => (extra.me ? openProfile() : openPeerMenu(id, ev)));
     ul.append(li);
@@ -885,10 +905,26 @@ function fillPeerCard(id) {
   $('#pmStatus').textContent = prof?.status || ''; $('#pmStatus').hidden = !prof?.status;
   $('#pmAbout').textContent = prof?.about || ''; $('#pmAbout').hidden = !prof?.about;
   // модерация: администратор и создатель комнаты (админа трогать может только админ, и только глушить)
-  const canMod = !!(myFlags?.admin || myFlags?.owner) && (!r.admin || myFlags?.admin);
+  const canMod = canModerate && (!r.admin || myFlags?.admin);
   $('#pmMod').hidden = !canMod;
-  $('#pmKick').hidden = !!r.admin;
+  $('#pmRestrict').hidden = !!r.admin;
   $('#pmBan').hidden = !myFlags?.admin || !!r.admin;
+  const box = $('#pmRestricts');
+  box.replaceChildren();
+  for (const kind of ['voice', 'chat']) {
+    if (!isBlocked(r.rs, kind)) continue;
+    const row = document.createElement('div'); row.className = 'pm-restrict';
+    const t = document.createElement('span');
+    t.textContent = (kind === 'voice' ? '🚫🎙️ Без голоса ' : '🚫💬 Без чата ') + leftLabel(r.rs[kind]);
+    row.append(t);
+    if (canMod) {
+      const b = document.createElement('button'); b.type = 'button'; b.textContent = 'Снять';
+      b.onclick = (e) => { e.stopPropagation(); send({ type: 'unrestrict', id, kind }); };
+      row.append(b);
+    }
+    box.append(row);
+  }
+  box.hidden = !box.children.length;
 }
 function connText(p) {
   const s = p.pc.connectionState;
@@ -904,11 +940,12 @@ function updatePeerMenuStats() {
 document.addEventListener('click', (e) => { if (!e.target.closest('#peerMenu')) closePeerMenu(); });
 $('#pmClose').onclick = closePeerMenu;
 $('#pmForceMute').onclick = () => { if (openMenuPeer) send({ type: 'force-mute', id: openMenuPeer }); closePeerMenu(); };
-$('#pmKick').onclick = () => {
-  const id = openMenuPeer, p = peers.get(id);
+$('#pmRestrict').onclick = async () => {
+  const id = openMenuPeer, p = peers.get(id), r = roster.get(id) || {};
   if (!p) return;
   closePeerMenu();
-  if (confirm(`Выгнать ${p.name} из комнаты?\nВернуться сможет через 10 минут.`)) send({ type: 'kick', id });
+  const res = await askRestrict(p.name, r.login ? '@' + r.login : 'гость (по IP-адресу)');
+  if (res) send({ type: 'restrict', id, ...res });
 };
 $('#pmBan').onclick = async () => {
   const id = openMenuPeer, p = peers.get(id), r = roster.get(id) || {};
@@ -1000,6 +1037,7 @@ $('#chatForm').addEventListener('submit', (e) => {
   e.preventDefault();
   const text = $('#chatInput').value.trim();
   if (!text) return;
+  if (isBlocked(myRestrict, 'chat')) { toast(`💬 Вам запрещён чат в этой комнате ${leftLabel(myRestrict.chat)}`); return; }
   const payload = JSON.stringify({ type: 'chat', text });
   let sent = 0;
   for (const p of peers.values()) if (p.dc.readyState === 'open') { p.dc.send(payload); sent++; }
@@ -1057,6 +1095,7 @@ function setStatus(text, bad = false) {
 
 // --- кнопки
 function setMuted(v) {
+  if (!v && isBlocked(myRestrict, 'voice')) { toast(`🎙️ Вам запрещён голос в этой комнате ${leftLabel(myRestrict.voice)}`); v = true; }
   muted = v;
   if (!muted && deafened) { deafened = false; applyOutVolume(); }
   applyMute(); updateMediaButtons(); broadcastState(); renderUsers();
@@ -1652,6 +1691,155 @@ buildProfileUi();
 updateWho();
 
 // ------------------------------------------------------------------ модерация
+// --- выбор срока: готовые варианты или своё число минут/часов/дней
+const DUR_PRESETS = [[300, '5 мин'], [900, '15 мин'], [3600, '1 час'], [86400, '1 день'], [604800, '7 дней'], [2592000, '30 дней'], [0, 'Навсегда']];
+function makeDurPicker(el) {
+  el.replaceChildren();
+  const chips = document.createElement('div'); chips.className = 'chips-select'; chips.setAttribute('role', 'radiogroup');
+  const custom = document.createElement('div'); custom.className = 'dur-custom'; custom.hidden = true;
+  const num = document.createElement('input'); num.type = 'number'; num.min = '1'; num.max = '999'; num.value = '30'; num.inputMode = 'numeric';
+  num.setAttribute('aria-label', 'Сколько');
+  const unit = document.createElement('select'); unit.setAttribute('aria-label', 'Единица');
+  for (const [v, t] of [[60, 'минут'], [3600, 'часов'], [86400, 'дней']]) { const o = document.createElement('option'); o.value = v; o.textContent = t; unit.append(o); }
+  custom.append(num, unit);
+  let value = 0, isCustom = false;
+  const mark = () => chips.querySelectorAll('button').forEach((b) =>
+    b.setAttribute('aria-checked', String(b.dataset.custom ? isCustom : !isCustom && +b.dataset.s === value)));
+  for (const [s, t] of DUR_PRESETS) {
+    const b = document.createElement('button'); b.type = 'button'; b.dataset.s = s; b.textContent = t;
+    b.onclick = () => { value = s; isCustom = false; custom.hidden = true; mark(); };
+    chips.append(b);
+  }
+  const cb = document.createElement('button'); cb.type = 'button'; cb.dataset.custom = '1'; cb.textContent = 'Своё…';
+  cb.onclick = () => { isCustom = true; custom.hidden = false; mark(); num.focus(); num.select(); };
+  chips.append(cb);
+  el.append(chips, custom);
+  return {
+    reset(s) { value = s; isCustom = false; custom.hidden = true; mark(); },
+    get() {
+      if (!isCustom) return value;
+      const n = Math.round(+num.value) * +unit.value;
+      return n >= 60 && n <= 366 * 86400 ? n : null;
+    },
+  };
+}
+const banPicker = makeDurPicker($('#banDur'));
+const rsPicker = makeDurPicker($('#rsDur'));
+
+// --- ограничения в комнате: голос, чат, выгнать
+function restrictUntil(info) {
+  const conv = (v) => (v == null ? 0 : v === 0 ? Infinity : Date.now() + v * 1000);
+  return { voice: conv(info?.voice), chat: conv(info?.chat) };
+}
+function isBlocked(rs, kind) { return !!rs && rs[kind] > Date.now(); }
+function leftLabel(until) {
+  if (until === Infinity || until === 0) return 'навсегда';
+  const min = Math.max(1, Math.ceil((until - Date.now()) / 60000));   // вверх до минуты
+  const d = Math.floor(min / 1440), h = Math.floor(min % 1440 / 60), m = min % 60;
+  if (d) return 'ещё ' + d + ' дн' + (h ? ' ' + h + ' ч' : '');
+  if (h) return 'ещё ' + h + ' ч' + (m ? ' ' + m + ' мин' : '');
+  return 'ещё ' + m + ' мин';
+}
+function onRestrict(msg) {
+  if (msg.id === myId) {
+    myRestrict = restrictUntil(msg.restrict);
+    applyMyRestrict();
+    if (isBlocked(myRestrict, 'voice')) toast(`🎙️ Вам запретили голос ${leftLabel(myRestrict.voice)}`);
+    else if (isBlocked(myRestrict, 'chat')) toast(`💬 Вам запретили чат ${leftLabel(myRestrict.chat)}`);
+  } else {
+    const r = roster.get(msg.id);
+    if (r) { r.restrict = msg.restrict; r.rs = restrictUntil(msg.restrict); }
+    const p = peers.get(msg.id);
+    if (p) applyPeerVolume(p);
+    if (openMenuPeer === msg.id) fillPeerCard(msg.id);
+  }
+  renderUsers();
+}
+function applyMyRestrict() {
+  const v = isBlocked(myRestrict, 'voice'), c = isBlocked(myRestrict, 'chat');
+  if (v && !muted) setMuted(true);
+  $('#btnMute').classList.toggle('locked', v);
+  $('#btnMute').title = v ? `Голос запрещён ${leftLabel(myRestrict.voice)}` : 'Микрофон (Ctrl+Shift+M)';
+  const ci = $('#chatInput');
+  ci.disabled = c;
+  ci.placeholder = c ? `Чат запрещён ${leftLabel(myRestrict.chat)}` : 'Сообщение (сквозное шифрование)';
+}
+// сроки истекают сами: раз в 5 секунд пересчитываем, кого снова слышно
+setInterval(() => {
+  if (!myId) return;
+  if (applyMyRestrict.pending) { applyMyRestrict.pending = false; applyMyRestrict(); }
+  const any = [...roster.values()].some((r) => r.rs && (r.rs.voice || r.rs.chat)) || myRestrict.voice || myRestrict.chat;
+  if (!any) return;
+  for (const p of peers.values()) applyPeerVolume(p);
+  applyMyRestrict();
+  renderUsers();
+  if (openMenuPeer) fillPeerCard(openMenuPeer);
+}, 5000);
+
+const RS_KINDS = ['voice', 'chat', 'kick'];
+const RS_TEXT = {
+  voice: { icon: '🎙️', ok: 'Запретить голос', hint: 'Его перестанут слышать в этой комнате. Микрофон у него выключится.' },
+  chat: { icon: '💬', ok: 'Запретить чат', hint: 'Его сообщения перестанут показываться, писать он не сможет.' },
+  kick: { icon: '🚪', ok: 'Выгнать', hint: 'Его отключат, и он не сможет зайти в эту комнату, пока срок не выйдет.' },
+};
+let rsResolve = null, rsKind = 'voice';
+function setRsKind(kind) {
+  rsKind = kind;
+  const seg = $('#rsSeg');
+  seg.dataset.i = RS_KINDS.indexOf(kind);
+  seg.querySelectorAll('button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.kind === kind)));
+  $('#rsIcon').textContent = RS_TEXT[kind].icon;
+  $('#rsOk').textContent = RS_TEXT[kind].ok;
+  $('#rsHint').textContent = RS_TEXT[kind].hint;
+}
+function askRestrict(name, sub) {
+  $('#rsTitle').textContent = 'Ограничить ' + name;
+  $('#rsSub').textContent = sub;
+  $('#rsReason').value = '';
+  setRsKind('voice');
+  rsPicker.reset(900);
+  openSheet($('#rsDlg'));
+  return new Promise((res) => { rsResolve = res; });
+}
+function finishRestrict(result) { closeSheet($('#rsDlg')); rsResolve?.(result); rsResolve = null; }
+$$('#rsSeg button').forEach((b) => { b.onclick = () => setRsKind(b.dataset.kind); });
+$('#rsCancel').onclick = () => finishRestrict(null);
+$('#rsDlg').addEventListener('click', (e) => { if (e.target.id === 'rsDlg') finishRestrict(null); });
+$('#rsOk').onclick = () => {
+  const seconds = rsPicker.get();
+  if (seconds == null) { toast('Срок: от 1 минуты до 366 дней'); return; }
+  finishRestrict({ kind: rsKind, seconds, reason: $('#rsReason').value.trim() });
+};
+
+// --- список ограничений комнаты (снять раньше срока, в том числе с выгнанных)
+const RB_LABEL = { voice: '🚫🎙️ без голоса', chat: '🚫💬 без чата', kick: '🚪 выгнан' };
+$('#btnRoomBans').onclick = () => {
+  $('#rbList').innerHTML = '<li class="adm-empty">Загружаю…</li>';
+  openSheet($('#rbDlg'));
+  send({ type: 'restrictions' });
+};
+$('#rbClose').onclick = () => closeSheet($('#rbDlg'));
+$('#rbDlg').addEventListener('click', (e) => { if (e.target.id === 'rbDlg') closeSheet($('#rbDlg')); });
+function renderRoomBans(items) {
+  const ul = $('#rbList');
+  ul.replaceChildren();
+  if (!items.length) { const li = document.createElement('li'); li.className = 'adm-empty'; li.textContent = 'Ограничений нет 🎉'; ul.append(li); return; }
+  for (const it of items) {
+    const li = document.createElement('li'); li.className = 'adm-row';
+    const main = document.createElement('div'); main.className = 'adm-main';
+    const nm = document.createElement('div'); nm.className = 'adm-name'; nm.textContent = it.name || '?';
+    const meta = document.createElement('div'); meta.className = 'adm-meta';
+    meta.textContent = `${RB_LABEL[it.kind] || it.kind} · ${it.left ? leftLabel(Date.now() + it.left * 1000) : 'навсегда'} · ${it.by || '?'}` + (it.reason ? ` · ${it.reason}` : '');
+    main.append(nm, meta);
+    const acts = document.createElement('div'); acts.className = 'adm-acts';
+    const b = document.createElement('button'); b.type = 'button'; b.textContent = '✅ Снять';
+    b.onclick = () => { b.disabled = true; send({ type: 'unrestrict', target: it.target, kind: it.kind }); };
+    acts.append(b);
+    li.append(makeAvatar(it.name || '?'), main, acts);
+    ul.append(li);
+  }
+}
+
 function openSheet(el) {
   el.hidden = false;
   el.querySelector('.sheet-card').scrollTop = 0;
@@ -1668,18 +1856,17 @@ function askBan(name, sub) {
   $('#banTitle').textContent = 'Забанить ' + name + '?';
   $('#banSub').textContent = sub;
   $('#banReason').value = '';
-  selectBanDur('86400');
+  banPicker.reset(86400);
   openSheet($('#banDlg'));
   return new Promise((res) => { banResolve = res; });
 }
-function selectBanDur(s) { $$('#banDur button').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.s === s))); }
 function finishBan(result) { closeSheet($('#banDlg')); banResolve?.(result); banResolve = null; }
-$$('#banDur button').forEach((b) => { b.onclick = () => selectBanDur(b.dataset.s); });
 $('#banCancel').onclick = () => finishBan(null);
 $('#banDlg').addEventListener('click', (e) => { if (e.target.id === 'banDlg') finishBan(null); });
 $('#banOk').onclick = () => {
-  const sel = $('#banDur button[aria-checked="true"]');
-  finishBan({ seconds: +sel.dataset.s, reason: $('#banReason').value.trim() });
+  const seconds = banPicker.get();
+  if (seconds == null) { toast('Срок: от 1 минуты до 366 дней'); return; }
+  finishBan({ seconds, reason: $('#banReason').value.trim() });
 };
 
 let announceTimer = null;
@@ -1848,7 +2035,9 @@ $('#btnAdmin').onclick = openAdmin;
 $('#btnAdmin2').onclick = openAdmin;
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
-  if (!$('#banDlg').hidden) finishBan(null);
+  if (!$('#rsDlg').hidden) finishRestrict(null);
+  else if (!$('#rbDlg').hidden) closeSheet($('#rbDlg'));
+  else if (!$('#banDlg').hidden) finishBan(null);
   else if (!$('#adminPanel').hidden) closeSheet($('#adminPanel'));
 });
 function updateAdminButtons() {

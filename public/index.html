@@ -66,6 +66,7 @@
     <header class="room-head">
       <span class="hash">🔊</span><span id="roomName" class="room-name"></span>
       <span class="lock-mini" title="Сквозное шифрование">🔒</span>
+      <button id="btnRoomBans" class="icon-btn" title="Ограничения в комнате" hidden>🛡️</button>
       <button class="icon-btn js-theme" title="Тема: тёмная / розовая">🌸</button>
       <button class="icon-btn js-cats" title="Кошачий режим">🐱</button>
     </header>
@@ -125,9 +126,10 @@
   <div id="pmAbout" class="pm-about" hidden></div>
   <div id="pmMod" class="pm-mod" hidden>
     <button type="button" id="pmForceMute" class="mod-btn">🔇<span>Выкл. микрофон</span></button>
-    <button type="button" id="pmKick" class="mod-btn">🚪<span>Выгнать</span></button>
+    <button type="button" id="pmRestrict" class="mod-btn">🚫<span>Ограничить</span></button>
     <button type="button" id="pmBan" class="mod-btn danger">⛔<span>Забанить</span></button>
   </div>
+  <div id="pmRestricts" class="pm-restricts" hidden></div>
   <div class="pm-sec"></div>
   <label>Громкость голоса <span id="pmVolVal"></span>
     <input id="pmVol" type="range" min="0" max="400" step="1"></label>
@@ -283,19 +285,50 @@
       <div class="ban-icon">⛔</div>
       <h2 id="banTitle"></h2>
       <p id="banSub" class="muted small"></p>
-      <div id="banDur" class="chips-select" role="radiogroup" aria-label="Срок">
-        <button type="button" data-s="3600">1 час</button>
-        <button type="button" data-s="86400">1 день</button>
-        <button type="button" data-s="604800">7 дней</button>
-        <button type="button" data-s="2592000">30 дней</button>
-        <button type="button" data-s="0">Навсегда</button>
-      </div>
+      <div id="banDur" class="dur-picker"></div>
       <label class="pf-field">Причина (увидит забаненный)<input id="banReason" maxlength="120" placeholder="необязательно" autocomplete="off"></label>
       <div class="ban-actions">
         <button type="button" id="banCancel" class="btn">Отмена</button>
         <button type="button" id="banOk" class="btn danger">Забанить</button>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- ============ Ограничение в комнате ============ -->
+<div id="rsDlg" class="sheet" hidden>
+  <div class="sheet-card small" role="dialog" aria-modal="true" aria-labelledby="rsTitle">
+    <div class="ban-body">
+      <div id="rsIcon" class="ban-icon">🎙️</div>
+      <h2 id="rsTitle"></h2>
+      <p id="rsSub" class="muted small"></p>
+      <div id="rsSeg" class="seg rs-seg" role="tablist">
+        <span class="seg-thumb"></span>
+        <button type="button" role="tab" data-kind="voice">🎙️ Голос</button>
+        <button type="button" role="tab" data-kind="chat">💬 Чат</button>
+        <button type="button" role="tab" data-kind="kick">🚪 Выгнать</button>
+      </div>
+      <p id="rsHint" class="muted small rs-hint"></p>
+      <div id="rsDur" class="dur-picker"></div>
+      <label class="pf-field">Причина (увидят все в комнате)<input id="rsReason" maxlength="120" placeholder="необязательно" autocomplete="off"></label>
+      <div class="ban-actions">
+        <button type="button" id="rsCancel" class="btn">Отмена</button>
+        <button type="button" id="rsOk" class="btn danger"></button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ Ограничения комнаты ============ -->
+<div id="rbDlg" class="sheet" hidden>
+  <div class="sheet-card small" role="dialog" aria-modal="true" aria-labelledby="rbTitle">
+    <header class="sheet-head">
+      <span></span>
+      <h2 id="rbTitle">🛡️ Ограничения</h2>
+      <button type="button" id="rbClose" class="sheet-link strong">Готово</button>
+    </header>
+    <ul id="rbList" class="adm-list rb-list"></ul>
+    <p class="muted small rb-hint">Здесь можно снять ограничение раньше срока — в том числе с тех, кого выгнали и кого сейчас нет в комнате.</p>
   </div>
 </div>
 

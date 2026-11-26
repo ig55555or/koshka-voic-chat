@@ -32,6 +32,12 @@ CREATE TABLE IF NOT EXISTS rooms (
 CREATE TABLE IF NOT EXISTS ip_bans (
   ip TEXT PRIMARY KEY, until REAL NOT NULL, reason TEXT NOT NULL DEFAULT '',
   by_login TEXT NOT NULL DEFAULT '', created REAL NOT NULL);
+-- ограничения в комнате: kick — не пускать, voice — без голоса, chat — без чата. until = 0 — навсегда
+CREATE TABLE IF NOT EXISTS room_bans (
+  room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+  target TEXT NOT NULL, kind TEXT NOT NULL, until REAL NOT NULL,
+  reason TEXT NOT NULL DEFAULT '', by_login TEXT NOT NULL DEFAULT '', name TEXT NOT NULL DEFAULT '',
+  created REAL NOT NULL, PRIMARY KEY (room_id, target, kind));
 -- в какие чужие комнаты аккаунт уже входил по паролю: туда пускаем без пароля
 CREATE TABLE IF NOT EXISTS room_access (
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -179,6 +185,19 @@ class Store:
             self.unban_ip(ip)
             return None
         return row
+
+    def room_restrict(self, room_id: int, target: str, kind: str, until: float, reason: str, by: str, name: str):
+        self.db.execute("INSERT OR REPLACE INTO room_bans(room_id, target, kind, until, reason, by_login, name, created) "
+                        "VALUES(?,?,?,?,?,?,?,?)", (room_id, target, kind, until, reason, by, name, time.time()))
+
+    def room_unrestrict(self, room_id: int, target: str, kind: str):
+        self.db.execute("DELETE FROM room_bans WHERE room_id=? AND target=? AND kind=?", (room_id, target, kind))
+
+    def room_restrictions(self, room_id: int, target: str | None = None):
+        self.db.execute("DELETE FROM room_bans WHERE until>0 AND until<?", (time.time(),))
+        if target is None:
+            return self.db.execute("SELECT * FROM room_bans WHERE room_id=? ORDER BY created DESC", (room_id,)).fetchall()
+        return self.db.execute("SELECT * FROM room_bans WHERE room_id=? AND target=?", (room_id, target)).fetchall()
 
     def list_ip_bans(self):
         self.db.execute("DELETE FROM ip_bans WHERE until>0 AND until<?", (time.time(),))

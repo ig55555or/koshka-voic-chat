@@ -81,13 +81,14 @@ class Peer:
         self.profile = load_profile(user) if user else dict(EMPTY_PROFILE)
         self.ip = ""
         self.owner = False      # создатель комнаты, в которой сейчас
+        self.restrict = {"voice": None, "chat": None}
         self.guest = user is None
         self.room: Room | None = None
         self.state: dict = {}
 
     def info(self) -> dict:
         return {"id": self.id, "name": self.name, "login": self.login, "admin": self.admin, "guest": self.guest,
-                "owner": self.owner, "profile": self.profile}
+                "owner": self.owner, "profile": self.profile, "restrict": self.restrict}
 
     async def send(self, msg: dict):
         if not self.ws.closed:
@@ -123,9 +124,7 @@ login_limit = Limiter(10, 60)        # попыток входа с одного
 room_limit = Limiter(10, 60)         # попыток пароля комнаты с одного IP
 register_limit = Limiter(10, 3600)   # регистраций с одного IP
 profile_limit = Limiter(20, 60)      # сохранений профиля одним аккаунтом
-# выгнанных из комнаты не пускаем обратно какое-то время: {room_id: {ключ: до}}, ключ — логин или IP гостя
-room_kicks: dict[int, dict[str, float]] = {}
-KICK_COOLDOWN = 10 * 60
+RESTRICT_KINDS = {"kick": "вход в комнату", "voice": "голос", "chat": "чат"}
 
 
 async def hash_pw(password: str) -> str:
@@ -378,28 +377,50 @@ async def api_profile(request: web.Request):
 
 
 # ---------------------------------------------------------------- модерация
-BAN_DURATIONS = {3600, 86400, 7 * 86400, 30 * 86400, 0}   # 0 — навсегда
+MAX_BAN = 366 * 86400        # дольше года — это «навсегда» (0)
 
 
 def ban_text(until, reason: str) -> str:
     # оставшееся время, а не дата: у сервера в Docker часовой пояс UTC
-    if not until:
-        when = "навсегда"
-    else:
-        left = max(60, int(until - time.time()))
-        d, h, m = left // 86400, left % 86400 // 3600, left % 3600 // 60
-        when = "ещё на " + (f"{d} д {h} ч" if d else f"{h} ч {m} мин" if h else f"{m} мин")
+    when = "навсегда" if not until else "ещё на " + left_text(until)
     return f"Доступ заблокирован {when}" + (f". Причина: {reason}" if reason else "")
 
 
 def ban_until(seconds) -> float | None:
+    """0 — навсегда, иначе от минуты до года. None — неверный срок."""
     try:
         seconds = int(seconds)
     except (TypeError, ValueError):
         return None
-    if seconds not in BAN_DURATIONS:
+    if seconds == 0:
+        return 0
+    if not 60 <= seconds <= MAX_BAN:
         return None
-    return 0 if seconds == 0 else time.time() + seconds
+    return time.time() + seconds
+
+
+def left_text(until) -> str:
+    if not until:
+        return "навсегда"
+    left = max(60, int(until - time.time() + 59))   # вверх до минуты: «на 1 ч 30 мин», а не «1 ч 29 мин»
+    d, h, m = left // 86400, left % 86400 // 3600, left % 3600 // 60
+    if d:
+        return f"{d} д" + (f" {h} ч" if h else "")
+    return (f"{h} ч" + (f" {m} мин" if m else "")) if h else f"{m} мин"
+
+
+def peer_key(p) -> str:
+    """Кого ограничиваем: аккаунт — по логину, гостя — по IP."""
+    return "u:" + accounts.login_key(p.login) if p.login else "ip:" + p.ip
+
+
+def restrict_info(room_id: int, key: str) -> dict:
+    """{voice, chat}: None — свободно, 0 — навсегда, иначе секунд осталось (не время: часы у всех разные)."""
+    out = {"voice": None, "chat": None}
+    for r in store.room_restrictions(room_id, key):
+        if r["kind"] in out:
+            out[r["kind"]] = 0 if not r["until"] else max(1, int(r["until"] - time.time()))
+    return out
 
 
 async def drop_peer(p, message: str):
@@ -644,22 +665,29 @@ async def ws_handler(request: web.Request):
                 if room and len(room.peers) >= MAX_ROOM_SIZE and not peer.admin:
                     await peer.send({"type": "error", "message": f"Комната заполнена (макс. {MAX_ROOM_SIZE})"})
                     continue
-                kick_key = peer.login or ip
-                until = room_kicks.get(row["id"], {}).get(kick_key, 0)
-                if until > time.time() and not peer.admin:
-                    await peer.send({"type": "error", "message": f"Вас выгнали из этой комнаты. Можно вернуться через {int(until - time.time()) // 60 + 1} мин."})
+                kicked = [r for r in store.room_restrictions(row["id"], peer_key(peer)) if r["kind"] == "kick"]
+                if kicked and not peer.admin:
+                    k = kicked[0]
+                    await peer.send({"type": "error", "message": "Вас выгнали из этой комнаты"
+                                     + (" навсегда" if not k["until"] else f". Вернуться можно через {left_text(k['until'])}")
+                                     + (f". Причина: {k['reason']}" if k["reason"] else "")})
                     continue
+                peer.restrict = {"voice": None, "chat": None} if peer.admin else restrict_info(row["id"], peer_key(peer))
                 if room is None:
                     room = rooms[row["id"]] = Room(row)
                 peer.owner = peer.login is not None and peer.login == room.owner_login
                 if user:
                     store.touch_seen(user["id"])
+                for p in room.peers.values():   # сроки — «осталось секунд», поэтому считаем заново
+                    if not p.admin:
+                        p.restrict = restrict_info(room.id, peer_key(p))
                 existing = [{**p.info(), "state": p.state} for p in room.peers.values()]
                 peer.room = room
                 room.peers[peer.id] = peer
                 store.touch_room(room.id)
                 log.info("%s вошёл в комнату %s (%d чел.)", peer.name, room.name, len(room.peers))
-                await peer.send({"type": "joined", **peer.info(), "room": room.name, "peers": existing})
+                await peer.send({"type": "joined", **peer.info(), "room": room.name, "peers": existing,
+                                 "canModerate": can_moderate(peer, room)})
                 await broadcast(room, {"type": "peer-joined", **peer.info()}, exclude=peer.id)
 
             elif kind == "signal" and peer.room:
@@ -689,26 +717,52 @@ async def ws_handler(request: web.Request):
                     continue
                 await push_profile(live_peers_of(user["login"]) if user else [peer], name, prof)
 
-            elif kind in ("kick", "force-mute", "ban") and peer.room:
-                target = peer.room.peers.get(str(msg.get("id")))
-                if not target or target is peer:
-                    continue
-                if not can_moderate(peer, peer.room) or (target.admin and not peer.admin) or (target.admin and kind != "force-mute"):
+            elif kind in ("restrict", "unrestrict", "restrictions", "force-mute", "ban") and peer.room:
+                room = peer.room
+                if not can_moderate(peer, room):
                     await peer.send({"type": "error", "message": "Недостаточно прав"})
                     continue
-                room = peer.room
+                if kind == "restrictions":   # список ограничений комнаты
+                    await peer.send({"type": "restrictions", "items": [
+                        {"target": r["target"], "kind": r["kind"], "name": r["name"], "reason": r["reason"], "by": r["by_login"],
+                         "left": 0 if not r["until"] else max(1, int(r["until"] - time.time()))}
+                        for r in store.room_restrictions(room.id)]})
+                    continue
+                if kind == "unrestrict":
+                    key, what = str(msg.get("target", ""))[:200], msg.get("kind")
+                    if msg.get("id") in room.peers:   # участник в комнате — ключ (логин/IP) знает только сервер
+                        key = peer_key(room.peers[msg["id"]])
+                    if what not in RESTRICT_KINDS:
+                        continue
+                    row = next((r for r in store.room_restrictions(room.id, key) if r["kind"] == what), None)
+                    store.room_unrestrict(room.id, key, what)
+                    if row:
+                        log.info("%s снял ограничение (%s) с %s в %s", peer.name, what, row["name"], room.name)
+                        await broadcast(room, {"type": "notice", "text": f"✅ {peer.name} снял ограничение «{RESTRICT_KINDS[what]}» с {row['name']}"})
+                    for p in room.peers.values():
+                        if peer_key(p) == key:
+                            p.restrict = restrict_info(room.id, key)
+                            await broadcast(room, {"type": "restrict", "id": p.id, "restrict": p.restrict})
+                    await peer.send({"type": "restrictions-changed"})
+                    continue
+                target = room.peers.get(str(msg.get("id")))
+                if not target or target is peer:
+                    continue
+                if target.admin and (kind != "force-mute" or not peer.admin):
+                    await peer.send({"type": "error", "message": "Администратора ограничить нельзя"})
+                    continue
                 if kind == "force-mute":
                     await target.send({"type": "force-mute", "by": peer.name})
                     await broadcast(room, {"type": "notice", "text": f"{peer.name} выключил микрофон у {target.name}"})
                     continue
                 reason = _clean_text(msg.get("reason"), 120)
+                until = ban_until(msg.get("seconds"))
+                if until is None:
+                    await peer.send({"type": "error", "message": "Неверный срок: от минуты до года или навсегда"})
+                    continue
                 if kind == "ban":
                     if not peer.admin:
                         await peer.send({"type": "error", "message": "Банить может только администратор"})
-                        continue
-                    until = ban_until(msg.get("seconds"))
-                    if until is None:
-                        await peer.send({"type": "error", "message": "Неверный срок"})
                         continue
                     await broadcast(room, {"type": "notice", "text": f"⛔ {target.name} забанен"})
                     if target.login:
@@ -716,10 +770,26 @@ async def ws_handler(request: web.Request):
                     else:
                         await ban_guest_ip(target.ip, until, reason, peer.login)
                     continue
-                room_kicks.setdefault(room.id, {})[target.login or target.ip] = time.time() + KICK_COOLDOWN
-                log.info("%s выгнал %s из комнаты %s", peer.name, target.name, room.name)
-                await broadcast(room, {"type": "notice", "text": f"🚪 {peer.name} выгнал {target.name}"})
-                await drop_peer(target, f"Вас выгнали из комнаты «{room.name}»" + (f". Причина: {reason}" if reason else ""))
+                what = msg.get("kind")
+                if what not in RESTRICT_KINDS:
+                    continue
+                key = peer_key(target)
+                store.room_restrict(room.id, key, what, until, reason, peer.login or peer.name, target.name)
+                span = "навсегда" if not until else "на " + left_text(until)
+                log.info("%s ограничил %s (%s, %s) в %s", peer.name, target.name, what, span, room.name)
+                tail = f". Причина: {reason}" if reason else ""
+                if what == "kick":
+                    await broadcast(room, {"type": "notice", "text": f"🚪 {peer.name} выгнал {target.name} {span}"})
+                    # с этого же аккаунта/IP могут сидеть ещё вкладки — выгоняем все
+                    for p in [p for p in room.peers.values() if peer_key(p) == key]:
+                        await drop_peer(p, f"Вас выгнали из комнаты «{room.name}» {span}{tail}")
+                else:
+                    label = "🎙️ без голоса" if what == "voice" else "💬 без чата"
+                    await broadcast(room, {"type": "notice", "text": f"{peer.name}: {target.name} {label} {span}{tail}"})
+                    for p in room.peers.values():
+                        if peer_key(p) == key:
+                            p.restrict = restrict_info(room.id, key)
+                            await broadcast(room, {"type": "restrict", "id": p.id, "restrict": p.restrict})
 
             elif kind == "rename" and peer.room:
                 if time.time() - peer.renamed_at < 2:
