@@ -65,6 +65,8 @@ class Room:
         self.id = row["id"]
         self.name = row["name"]
         self.temporary = row["owner_id"] is None    # создана гостем: живёт, пока в ней кто-то есть
+        owner = store.one("SELECT login FROM users WHERE id=?", row["owner_id"]) if row["owner_id"] else None
+        self.owner_login = owner["login"] if owner else None
         self.peers: dict[str, "Peer"] = {}
 
 
@@ -77,13 +79,15 @@ class Peer:
         self.admin = bool(user and user["is_admin"])
         self.renamed_at = 0.0
         self.profile = load_profile(user) if user else dict(EMPTY_PROFILE)
+        self.ip = ""
+        self.owner = False      # создатель комнаты, в которой сейчас
         self.guest = user is None
         self.room: Room | None = None
         self.state: dict = {}
 
     def info(self) -> dict:
         return {"id": self.id, "name": self.name, "login": self.login, "admin": self.admin, "guest": self.guest,
-                "profile": self.profile}
+                "owner": self.owner, "profile": self.profile}
 
     async def send(self, msg: dict):
         if not self.ws.closed:
@@ -119,6 +123,9 @@ login_limit = Limiter(10, 60)        # попыток входа с одного
 room_limit = Limiter(10, 60)         # попыток пароля комнаты с одного IP
 register_limit = Limiter(10, 3600)   # регистраций с одного IP
 profile_limit = Limiter(20, 60)      # сохранений профиля одним аккаунтом
+# выгнанных из комнаты не пускаем обратно какое-то время: {room_id: {ключ: до}}, ключ — логин или IP гостя
+room_kicks: dict[int, dict[str, float]] = {}
+KICK_COOLDOWN = 10 * 60
 
 
 async def hash_pw(password: str) -> str:
@@ -258,6 +265,7 @@ def check_nick(raw, user) -> tuple[str, str | None]:
 
 
 def start_session(request: web.Request, user):
+    store.touch_seen(user["id"])
     resp = web.json_response({"user": user_json(user)})
     https = request.secure or (TRUST_PROXY and request.headers.get("X-Forwarded-Proto") == "https")
     resp.set_cookie(COOKIE, store.new_session(user["id"]), max_age=accounts.SESSION_TTL,
@@ -275,6 +283,8 @@ async def api_register(request: web.Request):
     if not ALLOW_REGISTRATION:
         return api_error("Регистрация закрыта", 403)
     ip = client_ip(request)
+    if ban := store.ip_ban(ip):
+        return api_error(ban_text(ban["until"], ban["reason"]), 403)
     if register_limit.blocked(ip):
         return api_error("Слишком много регистраций, попробуйте позже", 429)
     login, password = accounts.clean_login(data.get("login")), str(data.get("password") or "")
@@ -301,6 +311,10 @@ async def api_login(request: web.Request):
     ok = await check_pw(password, user["pw"] if user else accounts.DUMMY_HASH)
     if not user or not ok:
         return api_error("Неверный логин или пароль", 401)
+    if accounts.ban_active(user["banned_until"]):
+        return api_error(ban_text(user["banned_until"], user["ban_reason"]), 403)
+    if (ban := store.ip_ban(ip)) and not user["is_admin"]:
+        return api_error(ban_text(ban["until"], ban["reason"]), 403)
     return start_session(request, user)
 
 
@@ -361,6 +375,159 @@ async def api_profile(request: web.Request):
         return api_error(err, 400)
     await push_profile(live_peers_of(user["login"]), name, prof)
     return web.json_response({"user": user_json(store.user_by_login(user["login"]))})
+
+
+# ---------------------------------------------------------------- модерация
+BAN_DURATIONS = {3600, 86400, 7 * 86400, 30 * 86400, 0}   # 0 — навсегда
+
+
+def ban_text(until, reason: str) -> str:
+    # оставшееся время, а не дата: у сервера в Docker часовой пояс UTC
+    if not until:
+        when = "навсегда"
+    else:
+        left = max(60, int(until - time.time()))
+        d, h, m = left // 86400, left % 86400 // 3600, left % 3600 // 60
+        when = "ещё на " + (f"{d} д {h} ч" if d else f"{h} ч {m} мин" if h else f"{m} мин")
+    return f"Доступ заблокирован {when}" + (f". Причина: {reason}" if reason else "")
+
+
+def ban_until(seconds) -> float | None:
+    try:
+        seconds = int(seconds)
+    except (TypeError, ValueError):
+        return None
+    if seconds not in BAN_DURATIONS:
+        return None
+    return 0 if seconds == 0 else time.time() + seconds
+
+
+async def drop_peer(p, message: str):
+    """Отключить участника: он увидит сообщение, остальные — что он вышел."""
+    await p.send({"type": "kicked", "message": message})
+    await leave(p)
+    await p.ws.close()
+
+
+async def ban_account(target, until: float, reason: str, by: str):
+    store.ban_user(target["id"], until, reason)
+    log.info("%s забанил %s (%s)", by, target["login"], ban_text(until, reason))
+    for p in live_peers_of(target["login"]):
+        await drop_peer(p, ban_text(until, reason))
+
+
+async def ban_guest_ip(ip: str, until: float, reason: str, by: str):
+    store.ban_ip(ip, until, reason, by)
+    log.info("%s забанил IP %s (%s)", by, ip, ban_text(until, reason))
+    for r in list(rooms.values()):
+        for p in list(r.peers.values()):
+            if p.guest and p.ip == ip:
+                await drop_peer(p, ban_text(until, reason))
+
+
+def can_moderate(actor, room) -> bool:
+    """Выгонять и глушить может администратор и создатель комнаты."""
+    return actor.admin or (actor.login is not None and room.owner_login == actor.login)
+
+
+async def announce(text: str, by: str):
+    n = 0
+    for r in list(rooms.values()):
+        for p in list(r.peers.values()):
+            await p.send({"type": "announce", "text": text, "from": by})
+            n += 1
+    return n
+
+
+# ---------------------------------------------------------------- админ-панель
+def require_admin(request):
+    user = current_user(request)
+    return user if user and user["is_admin"] else None
+
+
+def where_online(login: str) -> list[str]:
+    return sorted({p.room.name for p in live_peers_of(login) if p.room})
+
+
+async def api_admin_users(request: web.Request):
+    if not require_admin(request):
+        return api_error("Только для администратора", 403)
+    users = []
+    for u in store.list_users():
+        users.append({"login": u["login"], "nick": display_name(u), "admin": bool(u["is_admin"]),
+                      "profile": load_profile(u), "created": u["created"], "lastSeen": u["last_seen"],
+                      "banned": accounts.ban_active(u["banned_until"]), "bannedUntil": u["banned_until"],
+                      "banReason": u["ban_reason"], "rooms": u["room_count"], "online": where_online(u["login"])})
+    guests = [{"name": p.name, "room": r.name, "ip": p.ip} for r in rooms.values() for p in r.peers.values() if p.guest]
+    online = sum(len(r.peers) for r in rooms.values())
+    return web.json_response({"users": users, "guests": guests, "bans": [
+        {"ip": b["ip"], "until": b["until"], "reason": b["reason"], "by": b["by_login"], "created": b["created"]}
+        for b in store.list_ip_bans()],
+        "stats": {"users": len(users), "online": online, "rooms": len(rooms), "banned": sum(u["banned"] for u in users)}})
+
+
+async def api_admin_action(request: web.Request):
+    data = await read_json(request)
+    admin = require_admin(request)
+    if not admin:
+        return api_error("Только для администратора", 403)
+    action = data.get("action")
+    reason = _clean_text(data.get("reason"), 120)
+
+    if action == "announce":
+        text = _clean_text(data.get("text"), 300)
+        if not text:
+            return api_error("Пустое объявление")
+        n = await announce(text, display_name(admin))
+        log.info("%s: объявление «%s» (%d чел.)", admin["login"], text, n)
+        return web.json_response({"delivered": n})
+
+    if action in ("ban-ip", "unban-ip"):
+        ip = str(data.get("ip") or "").strip()[:64]
+        try:
+            ipaddress.ip_address(ip)
+        except ValueError:
+            return api_error("Неверный IP")
+        if action == "unban-ip":
+            store.unban_ip(ip)
+            return web.json_response({})
+        until = ban_until(data.get("seconds"))
+        if until is None:
+            return api_error("Неверный срок")
+        await ban_guest_ip(ip, until, reason, admin["login"])
+        return web.json_response({})
+
+    target = store.user_by_login(accounts.clean_login(data.get("login")))
+    if not target:
+        return api_error("Пользователь не найден", 404)
+    if target["id"] == admin["id"] and action in ("ban", "demote", "delete"):
+        return api_error("С собой так нельзя")
+    if action == "ban":
+        until = ban_until(data.get("seconds"))
+        if until is None:
+            return api_error("Неверный срок")
+        await ban_account(target, until, reason, admin["login"])
+    elif action == "unban":
+        store.unban_user(target["id"])
+        log.info("%s разбанил %s", admin["login"], target["login"])
+    elif action in ("promote", "demote"):
+        store.set_admin(target["id"], action == "promote")
+        log.info("%s %s права администратора у %s", admin["login"],
+                 "выдал" if action == "promote" else "снял", target["login"])
+        for p in live_peers_of(target["login"]):
+            await drop_peer(p, "Ваши права изменились — войдите в комнату заново")
+    elif action == "delete":
+        for p in live_peers_of(target["login"]):
+            await drop_peer(p, "Аккаунт удалён")
+        for rid in [r["id"] for r in store.list_rooms(target) if r["owner_id"] == target["id"]]:
+            live = rooms.pop(rid, None)
+            for p in list(live.peers.values()) if live else []:
+                await drop_peer(p, "Комнату удалили")
+        store.delete_user(target["id"])
+        log.info("%s удалил аккаунт %s", admin["login"], target["login"])
+    else:
+        return api_error("Неизвестное действие")
+    return web.json_response({})
 
 
 async def api_room_forget(request: web.Request):
@@ -436,6 +603,7 @@ async def ws_handler(request: web.Request):
     await ws.prepare(request)
     peer = Peer(ws, user)
     ip = client_ip(request)
+    peer.ip = ip
 
     try:
         async for raw in ws:
@@ -464,6 +632,9 @@ async def ws_handler(request: web.Request):
                         continue
                     prof, perr = clean_profile(msg.get("profile"))   # профиль гостя живёт в его браузере
                     peer.profile = dict(EMPTY_PROFILE) if perr else prof
+                if (ban := store.ip_ban(ip)) and not peer.admin:
+                    await peer.send({"type": "error", "message": ban_text(ban["until"], ban["reason"])})
+                    continue
                 row = await open_room(user, str(msg.get("room", "")).strip()[:MAX_ROOM],
                                       str(msg.get("password", ""))[:128], ip)
                 if isinstance(row, str):
@@ -473,8 +644,16 @@ async def ws_handler(request: web.Request):
                 if room and len(room.peers) >= MAX_ROOM_SIZE and not peer.admin:
                     await peer.send({"type": "error", "message": f"Комната заполнена (макс. {MAX_ROOM_SIZE})"})
                     continue
+                kick_key = peer.login or ip
+                until = room_kicks.get(row["id"], {}).get(kick_key, 0)
+                if until > time.time() and not peer.admin:
+                    await peer.send({"type": "error", "message": f"Вас выгнали из этой комнаты. Можно вернуться через {int(until - time.time()) // 60 + 1} мин."})
+                    continue
                 if room is None:
                     room = rooms[row["id"]] = Room(row)
+                peer.owner = peer.login is not None and peer.login == room.owner_login
+                if user:
+                    store.touch_seen(user["id"])
                 existing = [{**p.info(), "state": p.state} for p in room.peers.values()]
                 peer.room = room
                 room.peers[peer.id] = peer
@@ -509,6 +688,38 @@ async def ws_handler(request: web.Request):
                     await peer.send({"type": "error", "message": err})
                     continue
                 await push_profile(live_peers_of(user["login"]) if user else [peer], name, prof)
+
+            elif kind in ("kick", "force-mute", "ban") and peer.room:
+                target = peer.room.peers.get(str(msg.get("id")))
+                if not target or target is peer:
+                    continue
+                if not can_moderate(peer, peer.room) or (target.admin and not peer.admin) or (target.admin and kind != "force-mute"):
+                    await peer.send({"type": "error", "message": "Недостаточно прав"})
+                    continue
+                room = peer.room
+                if kind == "force-mute":
+                    await target.send({"type": "force-mute", "by": peer.name})
+                    await broadcast(room, {"type": "notice", "text": f"{peer.name} выключил микрофон у {target.name}"})
+                    continue
+                reason = _clean_text(msg.get("reason"), 120)
+                if kind == "ban":
+                    if not peer.admin:
+                        await peer.send({"type": "error", "message": "Банить может только администратор"})
+                        continue
+                    until = ban_until(msg.get("seconds"))
+                    if until is None:
+                        await peer.send({"type": "error", "message": "Неверный срок"})
+                        continue
+                    await broadcast(room, {"type": "notice", "text": f"⛔ {target.name} забанен"})
+                    if target.login:
+                        await ban_account(store.user_by_login(target.login), until, reason, peer.login)
+                    else:
+                        await ban_guest_ip(target.ip, until, reason, peer.login)
+                    continue
+                room_kicks.setdefault(room.id, {})[target.login or target.ip] = time.time() + KICK_COOLDOWN
+                log.info("%s выгнал %s из комнаты %s", peer.name, target.name, room.name)
+                await broadcast(room, {"type": "notice", "text": f"🚪 {peer.name} выгнал {target.name}"})
+                await drop_peer(target, f"Вас выгнали из комнаты «{room.name}»" + (f". Причина: {reason}" if reason else ""))
 
             elif kind == "rename" and peer.room:
                 if time.time() - peer.renamed_at < 2:
@@ -697,6 +908,8 @@ def main():
     app.router.add_post("/api/login", api_login)
     app.router.add_post("/api/logout", api_logout)
     app.router.add_post("/api/profile", api_profile)
+    app.router.add_get("/api/admin/users", api_admin_users)
+    app.router.add_post("/api/admin/action", api_admin_action)
     app.router.add_get("/api/rooms", api_rooms)
     app.router.add_post(r"/api/rooms/{id:\d{1,12}}/delete", api_room_delete)
     app.router.add_post(r"/api/rooms/{id:\d{1,12}}/forget", api_room_forget)

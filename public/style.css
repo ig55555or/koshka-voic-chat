@@ -377,3 +377,71 @@ textarea { width: 100%; color: var(--text); font: inherit; font-size: 16px; padd
   .sheet, .sheet-card, .seg-thumb, .pf-banner { transition: none; }
   .pf-avatar.pop, .pf-pane { animation: none; }
 }
+
+/* ================= Модерация и админка ================= */
+.pm-mod { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 12px; }
+.mod-btn { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 8px 4px; border: 0; border-radius: 10px;
+  background: var(--bg3); color: var(--text); font: inherit; font-size: 18px; cursor: pointer; transition: filter .15s, transform .12s; }
+.mod-btn span { font-size: 11px; }
+.mod-btn:hover { filter: brightness(1.12); }
+.mod-btn:active { transform: scale(.96); }
+.mod-btn.danger { background: color-mix(in srgb, var(--red) 22%, var(--bg3)); }
+.btn.danger { background: var(--red); color: #fff; }
+.admin-btn { padding: 9px 11px; }
+.settings-top { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+
+.sheet-card.small { width: min(380px, 100%); }
+.sheet-card.wide { width: min(620px, 100%); }
+.ban-body { padding: 22px 22px 20px; text-align: center; }
+.ban-icon { font-size: 40px; }
+.ban-body h2 { margin: 6px 0 2px; font-size: 19px; overflow-wrap: anywhere; }
+.ban-body .pf-field { text-align: left; margin-top: 14px; }
+.chips-select { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; margin-top: 14px; }
+.chips-select button { border: 1px solid var(--border); background: transparent; color: var(--text); border-radius: 999px;
+  padding: 7px 13px; font: inherit; font-size: 14px; cursor: pointer; transition: background .15s, color .15s, border-color .15s; }
+.chips-select button[aria-checked="true"] { background: var(--red); border-color: var(--red); color: #fff; }
+.ban-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 16px; }
+.ban-actions .btn { padding: 11px; font-weight: 600; }
+
+.adm-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 8px 16px 4px; }
+.adm-stat { background: var(--bg1); border-radius: 14px; padding: 10px 12px; }
+.adm-stat b { display: block; font-size: 22px; font-weight: 750; letter-spacing: -.02em; }
+.adm-stat span { font-size: 12px; color: var(--muted); }
+.adm-tabs { padding: 10px 16px; position: sticky; top: 52px; z-index: 2; background: var(--bg2); }
+.adm-pane { padding: 0 16px 20px; animation: pf-fade .22s ease; }
+.adm-search { margin: 0 0 8px; background: var(--bg1); border-color: transparent; border-radius: 12px; }
+.adm-filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.pf-chip.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.adm-list { list-style: none; margin: 0 0 14px; padding: 0; }
+.adm-row { display: flex; align-items: center; gap: 10px; padding: 10px 4px; border-bottom: 1px solid var(--border); }
+.adm-row:last-child { border-bottom: 0; }
+.adm-row .avatar { width: 40px; height: 40px; }
+.adm-row .avatar.emoji { font-size: 22px; }
+.adm-main { flex: 1; min-width: 0; }
+.adm-name { font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.adm-meta { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.adm-meta .on { color: var(--green); }
+.adm-meta .ban { color: var(--red); }
+.adm-acts { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+.adm-acts button { border: 0; background: var(--bg3); color: var(--text); border-radius: 8px; padding: 6px 9px; font: inherit;
+  font-size: 13px; cursor: pointer; white-space: nowrap; transition: filter .15s; }
+.adm-acts button:hover { filter: brightness(1.15); }
+.adm-acts button.danger { background: color-mix(in srgb, var(--red) 25%, var(--bg3)); }
+.adm-empty { color: var(--muted); font-size: 13px; padding: 10px 4px; }
+.adm-hint { margin-top: -4px; }
+#admText { background: var(--bg1); border: 1px solid transparent; border-radius: 12px; }
+
+.announce { position: fixed; top: calc(12px + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); z-index: 45;
+  width: min(560px, calc(100vw - 24px)); display: flex; align-items: flex-start; gap: 10px; padding: 12px 14px;
+  background: var(--accent); color: var(--on-accent); border-radius: 14px; box-shadow: 0 12px 34px rgb(0 0 0 / .4);
+  animation: ann-in .45s cubic-bezier(.32, .72, 0, 1); font-weight: 600; overflow-wrap: anywhere; }
+.announce span { flex: 1; }
+.announce button { background: #0003; border: 0; color: inherit; border-radius: 8px; width: 28px; height: 28px; cursor: pointer; flex-shrink: 0; }
+@keyframes ann-in { from { opacity: 0; transform: translate(-50%, -20px); } to { opacity: 1; transform: translate(-50%, 0); } }
+
+@media (max-width: 768px) {
+  .adm-stats { grid-template-columns: repeat(2, 1fr); }
+  .adm-row { flex-wrap: wrap; }
+  .adm-acts { width: 100%; justify-content: flex-start; padding-left: 50px; }
+}
+#banDlg { z-index: 38; }   /* поверх админ-панели */

@@ -28,6 +28,10 @@ CREATE TABLE IF NOT EXISTS rooms (
   id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, pw TEXT NOT NULL,
   owner_id INTEGER REFERENCES users(id) ON DELETE CASCADE,  -- NULL: временная, создана гостем
   created REAL NOT NULL, last_used REAL NOT NULL);
+-- баны по IP (для гостей): until = 0 — навсегда
+CREATE TABLE IF NOT EXISTS ip_bans (
+  ip TEXT PRIMARY KEY, until REAL NOT NULL, reason TEXT NOT NULL DEFAULT '',
+  by_login TEXT NOT NULL DEFAULT '', created REAL NOT NULL);
 -- в какие чужие комнаты аккаунт уже входил по паролю: туда пускаем без пароля
 CREATE TABLE IF NOT EXISTS room_access (
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -68,6 +72,11 @@ def check_credentials_format(login: str, password: str) -> str | None:
     return None
 
 
+def ban_active(until) -> bool:
+    """until: None — нет бана, 0 — навсегда, иначе время окончания."""
+    return until is not None and (until == 0 or until > time.time())
+
+
 def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8", "replace")).hexdigest()
 
@@ -87,6 +96,11 @@ class Store:
             self.db.execute("ALTER TABLE users ADD COLUMN nick TEXT")
         if "profile" not in cols:   # JSON: аватар, цвет, статус, о себе
             self.db.execute("ALTER TABLE users ADD COLUMN profile TEXT")
+        if "banned_until" not in cols:   # NULL — не забанен, 0 — навсегда, иначе время окончания
+            self.db.execute("ALTER TABLE users ADD COLUMN banned_until REAL")
+            self.db.execute("ALTER TABLE users ADD COLUMN ban_reason TEXT NOT NULL DEFAULT ''")
+        if "last_seen" not in cols:
+            self.db.execute("ALTER TABLE users ADD COLUMN last_seen REAL")
         self.db.execute("DELETE FROM sessions WHERE expires < ?", (time.time(),))
 
     def drop_guest_rooms(self):
@@ -126,8 +140,49 @@ class Store:
     def session_user(self, token: str):
         if not token:
             return None
-        return self.one("SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id "
+        user = self.one("SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id "
                         "WHERE s.token_hash=? AND s.expires>?", _token_hash(token), time.time())
+        return None if user is None or ban_active(user["banned_until"]) else user
+
+    # --- модерация
+    def ban_user(self, user_id: int, until: float, reason: str):
+        self.db.execute("UPDATE users SET banned_until=?, ban_reason=? WHERE id=?", (until, reason, user_id))
+        self.db.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+
+    def unban_user(self, user_id: int):
+        self.db.execute("UPDATE users SET banned_until=NULL, ban_reason='' WHERE id=?", (user_id,))
+
+    def set_admin(self, user_id: int, on: bool):
+        self.db.execute("UPDATE users SET is_admin=? WHERE id=?", (int(on), user_id))
+
+    def delete_user(self, user_id: int):
+        self.db.execute("DELETE FROM users WHERE id=?", (user_id,))   # сессии, комнаты и доступы — каскадом
+
+    def touch_seen(self, user_id: int):
+        self.db.execute("UPDATE users SET last_seen=? WHERE id=?", (time.time(), user_id))
+
+    def list_users(self):
+        return self.db.execute(
+            "SELECT u.*, (SELECT COUNT(*) FROM rooms r WHERE r.owner_id=u.id) AS room_count "
+            "FROM users u ORDER BY COALESCE(u.last_seen, u.created) DESC").fetchall()
+
+    def ban_ip(self, ip: str, until: float, reason: str, by_login: str):
+        self.db.execute("INSERT OR REPLACE INTO ip_bans(ip, until, reason, by_login, created) VALUES(?,?,?,?,?)",
+                        (ip, until, reason, by_login, time.time()))
+
+    def unban_ip(self, ip: str):
+        self.db.execute("DELETE FROM ip_bans WHERE ip=?", (ip,))
+
+    def ip_ban(self, ip: str):
+        row = self.one("SELECT * FROM ip_bans WHERE ip=?", ip)
+        if row and not ban_active(row["until"]):
+            self.unban_ip(ip)
+            return None
+        return row
+
+    def list_ip_bans(self):
+        self.db.execute("DELETE FROM ip_bans WHERE until>0 AND until<?", (time.time(),))
+        return self.db.execute("SELECT * FROM ip_bans ORDER BY created DESC").fetchall()
 
     def end_session(self, token: str):
         self.db.execute("DELETE FROM sessions WHERE token_hash=?", (_token_hash(token),))

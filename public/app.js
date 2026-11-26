@@ -58,10 +58,10 @@ let account = null;          // { login, admin } или null — гость
 let myName = '', myFlags = null, myProfile = null;
 let profileWaiter = null;    // ждём подтверждения сохранения профиля в комнате
 let kicked = false;
-const roleMark = (r) => (r?.admin ? ' 👑' : r?.guest ? ' · гость' : '');
+const roleMark = (r) => (r?.admin ? ' 👑' : r?.owner ? ' 🏠' : r?.guest ? ' · гость' : '');
 // у аккаунтов рядом с ником показываем логин — чтобы ником нельзя было выдать себя за другого
 const loginNote = (r) => (r?.login && r.login.toLowerCase() !== (r.name || '').toLowerCase() ? ` (@${r.login})` : '');
-const roleText = (r) => (r?.admin ? ' (администратор)' : r?.guest ? ' (гость)' : '');
+const roleText = (r) => (r?.admin ? ' (администратор)' : r?.owner ? ' (создатель комнаты)' : r?.guest ? ' (гость)' : '');
 window.__vc = { peers, get ctx() { return ctx; }, get A() { return A; } };   // для отладки из консоли (F12)
 
 // ------------------------------------------------------------------ внешний вид: темы и коты
@@ -334,6 +334,16 @@ function connect(room, password) {
         case 'peer-joined':
           roster.set(msg.id, msg);
           sysMsg(`${msg.name}${loginNote(msg)}${roleText(msg)} в комнате`); joinSound(true);
+          break;
+        case 'notice':
+          sysMsg(String(msg.text || ''));
+          break;
+        case 'announce':
+          showAnnounce(String(msg.text || ''), String(msg.from || ''));
+          break;
+        case 'force-mute':
+          if (!muted) setMuted(true);
+          toast(`🔇 ${msg.by || 'Модератор'} выключил ваш микрофон. Включить снова можно кнопкой «Микрофон».`);
           break;
         case 'renamed':
         case 'profile':
@@ -874,6 +884,11 @@ function fillPeerCard(id) {
   $('#pmSub').textContent = [r.login ? '@' + r.login : 'гость', r.admin ? '👑 администратор' : ''].filter(Boolean).join(' · ');
   $('#pmStatus').textContent = prof?.status || ''; $('#pmStatus').hidden = !prof?.status;
   $('#pmAbout').textContent = prof?.about || ''; $('#pmAbout').hidden = !prof?.about;
+  // модерация: администратор и создатель комнаты (админа трогать может только админ, и только глушить)
+  const canMod = !!(myFlags?.admin || myFlags?.owner) && (!r.admin || myFlags?.admin);
+  $('#pmMod').hidden = !canMod;
+  $('#pmKick').hidden = !!r.admin;
+  $('#pmBan').hidden = !myFlags?.admin || !!r.admin;
 }
 function connText(p) {
   const s = p.pc.connectionState;
@@ -888,6 +903,20 @@ function updatePeerMenuStats() {
 }
 document.addEventListener('click', (e) => { if (!e.target.closest('#peerMenu')) closePeerMenu(); });
 $('#pmClose').onclick = closePeerMenu;
+$('#pmForceMute').onclick = () => { if (openMenuPeer) send({ type: 'force-mute', id: openMenuPeer }); closePeerMenu(); };
+$('#pmKick').onclick = () => {
+  const id = openMenuPeer, p = peers.get(id);
+  if (!p) return;
+  closePeerMenu();
+  if (confirm(`Выгнать ${p.name} из комнаты?\nВернуться сможет через 10 минут.`)) send({ type: 'kick', id });
+};
+$('#pmBan').onclick = async () => {
+  const id = openMenuPeer, p = peers.get(id), r = roster.get(id) || {};
+  if (!p) return;
+  closePeerMenu();
+  const res = await askBan(p.name, r.login ? 'Аккаунт @' + r.login + ' не сможет войти' : 'Гость — бан по IP-адресу');
+  if (res) send({ type: 'ban', id, seconds: res.seconds, reason: res.reason });
+};
 
 function peerVolInput(key, valEl) {
   return (e) => {
@@ -1333,6 +1362,7 @@ const currentName = () => (inRoom() ? myName : account ? (account.nick || accoun
 const currentProfile = () => (inRoom() ? myProfile : account ? account.profile : settings.profile) || {};
 
 function updateWho() {
+  updateAdminButtons();
   const name = currentName() || 'Гость';
   makeAvatar(name, $('#whoAvatar'), currentProfile());
   $('#whoText').textContent = (account?.admin ? '👑 ' : '') + name;
@@ -1620,3 +1650,208 @@ async function saveProfile() {
 }
 buildProfileUi();
 updateWho();
+
+// ------------------------------------------------------------------ модерация
+function openSheet(el) {
+  el.hidden = false;
+  el.querySelector('.sheet-card').scrollTop = 0;
+  requestAnimationFrame(() => requestAnimationFrame(() => el.classList.add('open')));
+}
+function closeSheet(el) {
+  if (el.hidden) return;
+  el.classList.remove('open');
+  setTimeout(() => { if (!el.classList.contains('open')) el.hidden = true; }, 320);
+}
+
+let banResolve = null;
+function askBan(name, sub) {
+  $('#banTitle').textContent = 'Забанить ' + name + '?';
+  $('#banSub').textContent = sub;
+  $('#banReason').value = '';
+  selectBanDur('86400');
+  openSheet($('#banDlg'));
+  return new Promise((res) => { banResolve = res; });
+}
+function selectBanDur(s) { $$('#banDur button').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.s === s))); }
+function finishBan(result) { closeSheet($('#banDlg')); banResolve?.(result); banResolve = null; }
+$$('#banDur button').forEach((b) => { b.onclick = () => selectBanDur(b.dataset.s); });
+$('#banCancel').onclick = () => finishBan(null);
+$('#banDlg').addEventListener('click', (e) => { if (e.target.id === 'banDlg') finishBan(null); });
+$('#banOk').onclick = () => {
+  const sel = $('#banDur button[aria-checked="true"]');
+  finishBan({ seconds: +sel.dataset.s, reason: $('#banReason').value.trim() });
+};
+
+let announceTimer = null;
+function showAnnounce(text, from) {
+  $('#announceText').textContent = `📢 ${from ? from + ': ' : ''}${text}`;
+  $('#announce').hidden = false;
+  sysMsg(`📢 Объявление${from ? ' от ' + from : ''}: ${text}`);
+  settings.cats ? meow(0.7) : beep(660, 880, 0.12);
+  clearTimeout(announceTimer);
+  announceTimer = setTimeout(() => { $('#announce').hidden = true; }, 15000);
+}
+$('#announceClose').onclick = () => { $('#announce').hidden = true; };
+
+// ------------------------------------------------------------------ админ-панель
+let admData = null, admTab = 'users', admFilter = 'all';
+const ADM_TABS = ['users', 'guests', 'announce'];
+
+function agoText(t) {
+  if (!t) return 'давно';
+  const s = Date.now() / 1000 - t;
+  if (s < 90) return 'только что';
+  if (s < 3600) return Math.round(s / 60) + ' мин назад';
+  if (s < 86400) return Math.round(s / 3600) + ' ч назад';
+  if (s < 86400 * 30) return Math.round(s / 86400) + ' дн назад';
+  return new Date(t * 1000).toLocaleDateString();
+}
+function leftText(until) {
+  if (!until) return 'навсегда';
+  const s = until - Date.now() / 1000;
+  if (s < 3600) return 'ещё ' + Math.max(1, Math.round(s / 60)) + ' мин';
+  if (s < 86400) return 'ещё ' + Math.round(s / 3600) + ' ч';
+  return 'ещё ' + Math.round(s / 86400) + ' дн';
+}
+
+async function openAdmin() {
+  closePeerMenu();
+  $('#settings').hidden = true;
+  if (!$('#app').hidden) setChatOpen(false);
+  openSheet($('#adminPanel'));
+  setAdmTab(admTab);
+  await loadAdmin();
+}
+async function loadAdmin() {
+  try { admData = await api('admin/users'); } catch (e) { toast(e.message); return; }
+  const st = admData.stats;
+  const stat = (n, label) => `<div class="adm-stat"><b>${n}</b><span>${label}</span></div>`;
+  $('#admStats').innerHTML = stat(st.users, 'аккаунтов') + stat(st.online, 'сейчас онлайн') + stat(st.rooms, 'активных комнат') + stat(st.banned, 'забанено');
+  renderAdmin();
+}
+function setAdmTab(tab) {
+  admTab = tab;
+  const seg = $('#admSeg');
+  seg.dataset.i = ADM_TABS.indexOf(tab);
+  seg.querySelectorAll('button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
+  $('#admUsers').hidden = tab !== 'users';
+  $('#admGuests').hidden = tab !== 'guests';
+  $('#admAnnounce').hidden = tab !== 'announce';
+}
+function admButton(text, onclick, danger = false) {
+  const b = document.createElement('button'); b.type = 'button'; b.textContent = text;
+  if (danger) b.className = 'danger';
+  b.onclick = onclick;
+  return b;
+}
+async function admAction(body, okText) {
+  try { await api('admin/action', body); if (okText) toast(okText); } catch (e) { toast(e.message); }
+  await loadAdmin();
+}
+function renderAdmin() {
+  if (!admData) return;
+  const q = $('#admSearch').value.trim().toLowerCase();
+  const ul = $('#admUserList');
+  ul.replaceChildren();
+  const users = admData.users.filter((u) =>
+    (!q || u.login.toLowerCase().includes(q) || u.nick.toLowerCase().includes(q)) &&
+    (admFilter === 'all' || (admFilter === 'online' && u.online.length) || (admFilter === 'admins' && u.admin) || (admFilter === 'banned' && u.banned)));
+  if (!users.length) { const li = document.createElement('li'); li.className = 'adm-empty'; li.textContent = 'Никого не нашлось'; ul.append(li); }
+  for (const u of users) {
+    const li = document.createElement('li'); li.className = 'adm-row';
+    const main = document.createElement('div'); main.className = 'adm-main';
+    const nm = document.createElement('div'); nm.className = 'adm-name';
+    nm.textContent = u.nick + (u.admin ? ' 👑' : '') + (u.nick.toLowerCase() !== u.login.toLowerCase() ? ` (@${u.login})` : '');
+    const meta = document.createElement('div'); meta.className = 'adm-meta';
+    const bits = [];
+    if (u.online.length) { const s = document.createElement('span'); s.className = 'on'; s.textContent = '🟢 в «' + u.online.join('», «') + '»'; bits.push(s); }
+    else bits.push(u.lastSeen ? 'был(а) ' + agoText(u.lastSeen) : 'создан ' + agoText(u.created));
+    if (u.banned) { const s = document.createElement('span'); s.className = 'ban'; s.textContent = '⛔ бан ' + leftText(u.bannedUntil) + (u.banReason ? ` · ${u.banReason}` : ''); bits.push(s); }
+    bits.push(`комнат: ${u.rooms}`);
+    bits.forEach((b, i) => { if (i) meta.append(' · '); meta.append(b); });
+    main.append(nm, meta);
+    const acts = document.createElement('div'); acts.className = 'adm-acts';
+    const isMe = account && u.login === account.login;
+    if (!isMe) {
+      if (u.banned) acts.append(admButton('✅ Разбан', () => admAction({ action: 'unban', login: u.login }, `${u.nick} разбанен`)));
+      else acts.append(admButton('⛔ Бан', async () => {
+        const r = await askBan(u.nick, '@' + u.login + ' не сможет войти, пока бан не закончится');
+        if (r) admAction({ action: 'ban', login: u.login, ...r }, `${u.nick} забанен`);
+      }, true));
+      acts.append(admButton(u.admin ? 'Снять 👑' : 'Дать 👑', () => {
+        if (confirm(u.admin ? `Снять права администратора у ${u.nick}?` : `Сделать ${u.nick} администратором? Он сможет банить и заходить в любые комнаты.`))
+          admAction({ action: u.admin ? 'demote' : 'promote', login: u.login }, 'Готово');
+      }));
+      acts.append(admButton('🗑', () => {
+        if (confirm(`Удалить аккаунт @${u.login} навсегда?\nЕго комнаты тоже удалятся. Это нельзя отменить.`))
+          admAction({ action: 'delete', login: u.login }, 'Аккаунт удалён');
+      }, true));
+    } else {
+      const me = document.createElement('span'); me.className = 'adm-meta'; me.textContent = 'это вы'; acts.append(me);
+    }
+    li.append(makeAvatar(u.nick, undefined, u.profile), main, acts);
+    ul.append(li);
+  }
+
+  const gl = $('#admGuestList');
+  gl.replaceChildren();
+  if (!admData.guests.length) { const li = document.createElement('li'); li.className = 'adm-empty'; li.textContent = 'Сейчас гостей нет'; gl.append(li); }
+  for (const g of admData.guests) {
+    const li = document.createElement('li'); li.className = 'adm-row';
+    const main = document.createElement('div'); main.className = 'adm-main';
+    const nm = document.createElement('div'); nm.className = 'adm-name'; nm.textContent = g.name + ' · гость';
+    const meta = document.createElement('div'); meta.className = 'adm-meta'; meta.textContent = `в «${g.room}» · IP ${g.ip}`;
+    main.append(nm, meta);
+    const acts = document.createElement('div'); acts.className = 'adm-acts';
+    acts.append(admButton('⛔ Бан по IP', async () => {
+      const r = await askBan(g.name, 'Бан по IP ' + g.ip + ': с этого адреса не войдёт никто');
+      if (r) admAction({ action: 'ban-ip', ip: g.ip, ...r }, 'IP забанен');
+    }, true));
+    li.append(makeAvatar(g.name), main, acts);
+    gl.append(li);
+  }
+
+  const bl = $('#admBanList');
+  bl.replaceChildren();
+  if (!admData.bans.length) { const li = document.createElement('li'); li.className = 'adm-empty'; li.textContent = 'Банов по IP нет'; bl.append(li); }
+  for (const b of admData.bans) {
+    const li = document.createElement('li'); li.className = 'adm-row';
+    const main = document.createElement('div'); main.className = 'adm-main';
+    const nm = document.createElement('div'); nm.className = 'adm-name'; nm.textContent = b.ip;
+    const meta = document.createElement('div'); meta.className = 'adm-meta';
+    meta.textContent = `⛔ ${leftText(b.until)} · забанил ${b.by || '?'}${b.reason ? ' · ' + b.reason : ''}`;
+    main.append(nm, meta);
+    const acts = document.createElement('div'); acts.className = 'adm-acts';
+    acts.append(admButton('✅ Разбан', () => admAction({ action: 'unban-ip', ip: b.ip }, 'IP разбанен')));
+    li.append(main, acts);
+    bl.append(li);
+  }
+}
+$$('#admSeg button').forEach((b) => { b.onclick = () => setAdmTab(b.dataset.tab); });
+$$('.adm-filters .pf-chip').forEach((b) => {
+  b.onclick = () => { admFilter = b.dataset.f; $$('.adm-filters .pf-chip').forEach((x) => x.classList.toggle('on', x === b)); renderAdmin(); };
+});
+$('#admSearch').oninput = renderAdmin;
+$('#admRefresh').onclick = loadAdmin;
+$('#admClose').onclick = () => closeSheet($('#adminPanel'));
+$('#adminPanel').addEventListener('click', (e) => { if (e.target.id === 'adminPanel') closeSheet($('#adminPanel')); });
+$('#admSend').onclick = async () => {
+  const text = $('#admText').value.trim();
+  if (!text) return;
+  try {
+    const r = await api('admin/action', { action: 'announce', text });
+    toast(r.delivered ? `📢 Доставлено: ${r.delivered} чел.` : 'Сейчас никого нет в комнатах');
+    $('#admText').value = '';
+  } catch (e) { toast(e.message); }
+};
+$('#btnAdmin').onclick = openAdmin;
+$('#btnAdmin2').onclick = openAdmin;
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (!$('#banDlg').hidden) finishBan(null);
+  else if (!$('#adminPanel').hidden) closeSheet($('#adminPanel'));
+});
+function updateAdminButtons() {
+  $('#btnAdmin').hidden = !account?.admin;
+  $('#btnAdmin2').hidden = !account?.admin;
+}

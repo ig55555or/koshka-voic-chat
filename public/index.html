@@ -38,6 +38,7 @@
         <span id="whoAvatar" class="avatar"></span>
         <span class="who-me-text"><span id="whoText"></span><span class="who-me-hint">Профиль ›</span></span>
       </button>
+      <button type="button" id="btnAdmin" class="btn admin-btn" hidden title="Админ-панель">🛡️</button>
       <button type="button" id="btnShowLogin" class="btn">Войти</button>
       <button type="button" id="btnShowReg" class="btn">Регистрация</button>
       <button type="button" id="btnLogout" class="btn" hidden>Выйти</button>
@@ -122,6 +123,11 @@
   <div id="pmSub" class="pm-sub"></div>
   <div id="pmStatus" class="pm-status" hidden></div>
   <div id="pmAbout" class="pm-about" hidden></div>
+  <div id="pmMod" class="pm-mod" hidden>
+    <button type="button" id="pmForceMute" class="mod-btn">🔇<span>Выкл. микрофон</span></button>
+    <button type="button" id="pmKick" class="mod-btn">🚪<span>Выгнать</span></button>
+    <button type="button" id="pmBan" class="mod-btn danger">⛔<span>Забанить</span></button>
+  </div>
   <div class="pm-sec"></div>
   <label>Громкость голоса <span id="pmVolVal"></span>
     <input id="pmVol" type="range" min="0" max="400" step="1"></label>
@@ -140,7 +146,10 @@
   <div class="modal-card">
     <header class="modal-head"><h2>Настройки</h2><button id="btnCloseSettings" class="icon-btn">✕</button></header>
 
-    <button id="btnRename2" class="btn">👤 Мой профиль</button>
+    <div class="settings-top">
+      <button id="btnRename2" class="btn">👤 Мой профиль</button>
+      <button id="btnAdmin2" class="btn" hidden>🛡️ Админка</button>
+    </div>
 
     <div class="grid2">
       <label>Микрофон<select id="selInput"></select></label>
@@ -267,6 +276,72 @@
   </div>
 </div>
 
+<!-- ============ Бан ============ -->
+<div id="banDlg" class="sheet" hidden>
+  <div class="sheet-card small" role="dialog" aria-modal="true" aria-labelledby="banTitle">
+    <div class="ban-body">
+      <div class="ban-icon">⛔</div>
+      <h2 id="banTitle"></h2>
+      <p id="banSub" class="muted small"></p>
+      <div id="banDur" class="chips-select" role="radiogroup" aria-label="Срок">
+        <button type="button" data-s="3600">1 час</button>
+        <button type="button" data-s="86400">1 день</button>
+        <button type="button" data-s="604800">7 дней</button>
+        <button type="button" data-s="2592000">30 дней</button>
+        <button type="button" data-s="0">Навсегда</button>
+      </div>
+      <label class="pf-field">Причина (увидит забаненный)<input id="banReason" maxlength="120" placeholder="необязательно" autocomplete="off"></label>
+      <div class="ban-actions">
+        <button type="button" id="banCancel" class="btn">Отмена</button>
+        <button type="button" id="banOk" class="btn danger">Забанить</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ Админ-панель ============ -->
+<div id="adminPanel" class="sheet" hidden>
+  <div class="sheet-card wide" role="dialog" aria-modal="true" aria-labelledby="admTitle">
+    <header class="sheet-head">
+      <button type="button" id="admRefresh" class="sheet-link" title="Обновить">↻ Обновить</button>
+      <h2 id="admTitle">🛡️ Админка</h2>
+      <button type="button" id="admClose" class="sheet-link strong">Готово</button>
+    </header>
+    <div id="admStats" class="adm-stats"></div>
+    <div class="adm-tabs">
+      <div id="admSeg" class="seg" role="tablist">
+        <span class="seg-thumb"></span>
+        <button type="button" role="tab" data-tab="users">Люди</button>
+        <button type="button" role="tab" data-tab="guests">Гости и баны</button>
+        <button type="button" role="tab" data-tab="announce">Объявление</button>
+      </div>
+    </div>
+    <section id="admUsers" class="adm-pane">
+      <input id="admSearch" class="adm-search" placeholder="🔎 Поиск по нику или логину" autocomplete="off">
+      <div class="adm-filters">
+        <button type="button" class="pf-chip on" data-f="all">Все</button>
+        <button type="button" class="pf-chip" data-f="online">🟢 Онлайн</button>
+        <button type="button" class="pf-chip" data-f="admins">👑 Админы</button>
+        <button type="button" class="pf-chip" data-f="banned">⛔ Забаненные</button>
+      </div>
+      <ul id="admUserList" class="adm-list"></ul>
+    </section>
+    <section id="admGuests" class="adm-pane" hidden>
+      <div class="pf-label">Гости онлайн</div>
+      <ul id="admGuestList" class="adm-list"></ul>
+      <div class="pf-label">Баны по IP</div>
+      <ul id="admBanList" class="adm-list"></ul>
+      <p class="muted small adm-hint">Гостей банят по IP. У мобильного интернета один IP бывает у многих людей — баньте гостей осторожно.</p>
+    </section>
+    <section id="admAnnounce" class="adm-pane" hidden>
+      <p class="muted small">Сообщение сразу появится у всех, кто сейчас в любой комнате.</p>
+      <textarea id="admText" maxlength="300" rows="4" placeholder="Например: через 5 минут перезапуск сервера 🙏"></textarea>
+      <button type="button" id="admSend" class="btn primary">📢 Отправить всем</button>
+    </section>
+  </div>
+</div>
+
+<div id="announce" class="announce" hidden role="status"><span id="announceText"></span><button type="button" id="announceClose" aria-label="Закрыть">✕</button></div>
 <div id="toast" class="toast" hidden></div>
 <script type="module" src="app.js"></script>
 </body>
