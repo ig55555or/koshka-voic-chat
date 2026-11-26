@@ -1,0 +1,13 @@
+.venv/
+certs/
+__pycache__/
+.env
+data/
+.claude/
+*.zip
+*.7z
+*.db
+*.db-wal
+*.db-shm
+*.pem
+*.key

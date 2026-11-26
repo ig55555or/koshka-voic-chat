@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#1e1f22">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Кошкина видеосвязь</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E🐱%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ============ Экран входа ============ -->
+<section id="login" class="login">
+  <div class="card">
+    <div class="card-top"><h1>🐱 Кошкина видеосвязь</h1><div class="toggles"><button type="button" class="icon-btn js-theme" title="Тема: тёмная / розовая">🌸</button><button type="button" class="icon-btn js-cats" title="Кошачий режим">🐱</button></div></div>
+    <p class="muted">Звук, видео и экран зашифрованы сквозным шифрованием — сервер их только пересылает и прочитать не может.</p>
+
+    <!-- вход в аккаунт -->
+    <form id="authForm" hidden>
+      <h2 id="authTitle" class="card-h2">Вход</h2>
+      <label>Логин<input id="inLogin" maxlength="24" required autocomplete="username" autocapitalize="off" spellcheck="false"></label>
+      <label>Пароль<input id="inLoginPass" type="password" maxlength="128" required autocomplete="current-password"></label>
+      <button id="btnAuth" class="btn primary" type="submit">Войти</button>
+      <p id="authError" class="error" hidden></p>
+      <div class="auth-links">
+        <button type="button" id="btnAuthMode" class="link-btn"></button>
+        <button type="button" id="btnAuthBack" class="link-btn">← Без аккаунта</button>
+      </div>
+    </form>
+
+    <!-- кто я -->
+    <div id="whoRow" class="who-row">
+      <span id="whoText" class="muted"></span>
+      <button type="button" id="btnShowLogin" class="btn">Войти</button>
+      <button type="button" id="btnShowReg" class="btn">Регистрация</button>
+      <button type="button" id="btnLogout" class="btn" hidden>Выйти</button>
+    </div>
+
+  <form id="loginForm">
+    <label id="rowName">Ваше имя<input id="inName" maxlength="32" required autocomplete="nickname"></label>
+    <label>Комната<input id="inRoom" maxlength="48" required placeholder="например, наша-комната" autocapitalize="off"></label>
+    <label>Пароль комнаты<input id="inPass" type="password" maxlength="128" placeholder="кто создал комнату — тот задал"></label>
+    <button class="btn primary" type="submit">Войти в комнату</button>
+    <p id="loginError" class="error" hidden></p>
+  </form>
+
+    <!-- комнаты аккаунта (у администратора — все) -->
+    <div id="roomsBox" hidden>
+      <h2 id="roomsTitle" class="card-h2"></h2>
+      <ul id="roomList" class="room-list"></ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============ Основное окно ============ -->
+<section id="app" class="app" hidden>
+  <aside class="sidebar">
+    <header class="room-head">
+      <span class="hash">🔊</span><span id="roomName" class="room-name"></span>
+      <span class="lock-mini" title="Сквозное шифрование">🔒</span>
+      <button class="icon-btn js-theme" title="Тема: тёмная / розовая">🌸</button>
+      <button class="icon-btn js-cats" title="Кошачий режим">🐱</button>
+    </header>
+    <ul id="userList" class="users"></ul>
+
+    <div class="me-panel">
+      <div id="meAvatar" class="avatar"></div>
+      <div class="me-text">
+        <div id="meName" class="me-name"></div>
+        <div id="connStatus" class="me-status">Подключено</div>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div class="lock" title="Звук/видео шифруются DTLS-SRTP между участниками; сервер пересылает их, не расшифровывая">🔒 Сквозное шифрование</div>
+      <button id="btnLeave" class="btn danger">Выйти</button>
+    </header>
+
+    <div id="stage" class="stage">
+      <div id="stageEmpty" class="stage-empty muted">
+        <div class="empty-icon"><span class="no-cat">🎙️</span><span class="cat-only">😺</span></div>
+        <div>Включите камеру<span class="desktop-only"> или покажите экран</span> — видео появится здесь.</div>
+      </div>
+    </div>
+
+    <nav class="controls">
+      <button id="btnMute" class="ctl" title="Микрофон (Ctrl+Shift+M)"><span class="ico">🎙️</span><span class="lbl">Микрофон</span></button>
+      <button id="btnDeafen" class="ctl" title="Звук (Ctrl+Shift+D)"><span class="ico">🎧</span><span class="lbl">Звук</span></button>
+      <button id="btnCam" class="ctl" title="Камера"><span class="ico">📷</span><span class="lbl">Камера</span></button>
+      <button id="btnFlip" class="ctl" title="Сменить камеру" hidden><span class="ico">🔄</span><span class="lbl">Сменить</span></button>
+      <button id="btnShare" class="ctl" title="Показать экран" hidden><span class="ico">🖥️</span><span class="lbl">Экран</span></button>
+      <button id="btnChat" class="ctl mobile-only" title="Чат"><span class="ico">💬</span><span class="lbl">Чат</span><span id="chatBadge" class="badge" hidden></span></button>
+      <button id="btnSettings" class="ctl" title="Настройки"><span class="ico">⚙️</span><span class="lbl">Настройки</span></button>
+      <button id="btnLeave2" class="ctl leave mobile-only" title="Выйти"><span class="ico">📞</span><span class="lbl">Выйти</span></button>
+    </nav>
+
+    <section id="chat" class="chat">
+      <header class="chat-head mobile-only"><b>Чат</b><button id="btnChatClose" class="icon-btn">✕</button></header>
+      <div id="chatLog" class="chat-log"></div>
+      <form id="chatForm" class="chat-form">
+        <input id="chatInput" maxlength="2000" placeholder="Сообщение (сквозное шифрование)" autocomplete="off" enterkeyhint="send">
+      </form>
+    </section>
+  </main>
+</section>
+
+<!-- ============ Меню участника ============ -->
+<div id="peerMenu" class="popover" hidden>
+  <div class="pm-head"><span class="pm-name" id="pmName"></span><button id="pmClose" class="icon-btn mobile-only">✕</button></div>
+  <label>Громкость голоса <span id="pmVolVal"></span>
+    <input id="pmVol" type="range" min="0" max="400" step="1"></label>
+  <label id="pmScreenRow">Громкость трансляции <span id="pmScreenVal"></span>
+    <input id="pmScreenVol" type="range" min="0" max="400" step="1"></label>
+  <label class="check"><input id="pmMute" type="checkbox"> Заглушить для меня</label>
+  <div class="pm-sec">
+    <div class="muted small">Код безопасности (сверьте голосом с другом):</div>
+    <div id="pmCode" class="code">…</div>
+    <div id="pmPing" class="muted small"></div>
+  </div>
+</div>
+
+<!-- ============ Настройки ============ -->
+<div id="settings" class="modal" hidden>
+  <div class="modal-card">
+    <header class="modal-head"><h2>Настройки</h2><button id="btnCloseSettings" class="icon-btn">✕</button></header>
+
+    <div class="grid2">
+      <label>Микрофон<select id="selInput"></select></label>
+      <label id="rowOutput">Динамики / наушники<select id="selOutput"></select></label>
+      <label>Громкость микрофона <span id="micVolVal"></span>
+        <input id="micVol" type="range" min="0" max="400" step="1"></label>
+      <label>Общая громкость звука <span id="outVolVal"></span>
+        <input id="outVol" type="range" min="0" max="200" step="1"></label>
+    </div>
+
+    <h3>Обработка голоса</h3>
+    <label>Шумоподавление
+      <select id="selNs">
+        <option value="rnnoise">ИИ (RNNoise) — сильное, как Krisp</option>
+        <option value="browser">Стандартное (встроенное в браузер)</option>
+        <option value="off">Выключено</option>
+      </select>
+    </label>
+    <label class="check"><input id="chkEcho" type="checkbox"> Эхоподавление</label>
+    <label class="check"><input id="chkLeveler" type="checkbox"> Выравнивание громкости голоса (тихий голос станет громче) — рекомендуется</label>
+    <label class="check"><input id="chkAgc" type="checkbox"> Автоусиление браузера (обычно не нужно при выравнивании)</label>
+
+    <label>Порог активации голоса (шумовой гейт) <span id="gateVal"></span>
+      <input id="gate" type="range" min="-100" max="-10" step="1"></label>
+    <div class="meter"><div id="meterBar" class="meter-bar"></div><div id="meterTh" class="meter-th"></div></div>
+    <p class="muted small">Тише порога — микрофон молчит. Крайнее левое положение — гейт выключен.</p>
+    <button id="btnTest" class="btn">Проверить микрофон (слышать себя)</button>
+
+    <h3>Связь</h3>
+    <p class="muted small">Проверяет, может ли это устройство подключиться к серверу пересылки звука и видео.</p>
+    <button id="btnNetTest" class="btn">🩺 Проверить связь с сервером</button>
+    <p id="netResult" class="small"></p>
+
+    <h3>Камера</h3>
+    <div class="grid2">
+      <label id="rowCam">Камера<select id="selCam"></select></label>
+      <label>Качество камеры
+        <select id="selCamQuality">
+          <option value="360p">360p — экономно (мобильный интернет)</option>
+          <option value="720p">720p — обычное</option>
+          <option value="1080p">1080p — высокое</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="desktop-only">
+      <h3>Трансляция экрана</h3>
+      <label>Качество
+        <select id="selQuality">
+          <option value="720p30">720p, 30 FPS</option>
+          <option value="1080p30">1080p, 30 FPS</option>
+          <option value="1080p60">1080p, 60 FPS</option>
+          <option value="1440p60">1440p, 60 FPS (нужен хороший интернет)</option>
+        </select>
+      </label>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+<script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+.venv/
+certs/
+__pycache__/
+.claude/
+.env
+*.bat
+README.md
+.git/
+data/
+*.zip

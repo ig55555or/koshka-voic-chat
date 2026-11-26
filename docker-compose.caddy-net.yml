@@ -1,0 +1,9 @@
+# Подключается скриптом run.sh, только если Caddy работает в своей docker-сети.
+services:
+  voice:
+    networks: [default, caddy]
+
+networks:
+  caddy:
+    external: true
+    name: ${CADDY_NETWORK}
