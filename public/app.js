@@ -57,6 +57,8 @@ let account = null;          // { login, admin } или null — гость
 let myName = '', myFlags = null;
 let kicked = false;
 const roleMark = (r) => (r?.admin ? ' 👑' : r?.guest ? ' · гость' : '');
+// у аккаунтов рядом с ником показываем логин — чтобы ником нельзя было выдать себя за другого
+const loginNote = (r) => (r?.login && r.login.toLowerCase() !== (r.name || '').toLowerCase() ? ` (@${r.login})` : '');
 const roleText = (r) => (r?.admin ? ' (администратор)' : r?.guest ? ' (гость)' : '');
 window.__vc = { peers, get ctx() { return ctx; }, get A() { return A; } };   // для отладки из консоли (F12)
 
@@ -325,8 +327,26 @@ function connect(room, password) {
           break;
         case 'peer-joined':
           roster.set(msg.id, msg);
-          sysMsg(`${msg.name}${roleText(msg)} в комнате`); joinSound(true);
+          sysMsg(`${msg.name}${loginNote(msg)}${roleText(msg)} в комнате`); joinSound(true);
           break;
+        case 'renamed': {
+          if (msg.id === myId) {
+            myName = msg.name;
+            if (account) account.nick = msg.name; else { settings.name = msg.name; save(); }
+            $('#meName').textContent = myName + roleMark(myFlags);
+            makeAvatar(myName, $('#meAvatar'));
+            sysMsg(`Теперь вас зовут «${myName}»`);
+          } else {
+            const p = peers.get(msg.id), r = roster.get(msg.id);
+            const old = p?.name || r?.name || 'Кто-то';
+            if (r) r.name = msg.name;
+            if (p) p.name = msg.name;
+            sysMsg(`${old} теперь «${msg.name}»`);
+            if (openMenuPeer === msg.id && p) $('#pmName').textContent = p.name + loginNote(r) + roleMark(r);
+          }
+          renderUsers(); renderStage();
+          break;
+        }
         case 'peer-left': {
           const p = peers.get(msg.id);
           sysMsg(`${p?.name || roster.get(msg.id)?.name || 'Кто-то'}: связь завершена`); joinSound(false);
@@ -364,9 +384,10 @@ function createPeer(id, name, initiator) {
     iceServers, bundlePolicy: 'max-bundle',
     iceTransportPolicy: relayOnly ? 'relay' : 'all',   // relay = только через сервер
   });
-  const saved = settings.peerVolumes[name] || {};
+  const volKey = roster.get(id)?.login || name;   // громкость помним по логину: ник может меняться
+  const saved = settings.peerVolumes[volKey] || {};
   const p = {
-    id, name, pc, initiator, tx: null, state: {}, queue: Promise.resolve(), pendingIce: [],
+    id, name, volKey, pc, initiator, tx: null, state: {}, queue: Promise.resolve(), pendingIce: [],
     voice: saved.voice ?? 100, screen: saved.screen ?? 100, localMute: false,
     gain: ctx.createGain(), screenGain: ctx.createGain(), analyser: ctx.createAnalyser(),
     holders: [], videoTrack: null, camTrack: null, code: null, rtt: null, connected: false,
@@ -735,6 +756,17 @@ function makeAvatar(name, el = document.createElement('div')) {
   return el;
 }
 
+function renameMe() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const name = prompt('Новый ник (его увидят все в комнате):', myName);
+  if (name == null) return;
+  const v = name.trim().slice(0, 32);
+  if (!v || v === myName) return;
+  send({ type: 'rename', name: v });
+}
+$('#btnRename').onclick = renameMe;
+$('#btnRename2').onclick = () => { $('#settings').hidden = true; renameMe(); };
+
 function renderUsers() {
   const ul = $('#userList');
   ul.replaceChildren();
@@ -746,7 +778,8 @@ function renderUsers() {
     av.dataset.speak = id;
     const n = document.createElement('span');
     n.className = 'uname';
-    n.textContent = name + roleMark(extra.role) + (extra.me ? ' (вы)' : '');
+    n.textContent = name + loginNote(extra.role ? { ...extra.role, name } : null) + roleMark(extra.role) + (extra.me ? ' (вы)' : '');
+    if (extra.me) li.title = 'Нажмите, чтобы сменить ник';
     li.append(av, n);
     if (st.sharing) { const l = document.createElement('span'); l.className = 'live'; l.textContent = 'В ЭФИРЕ'; li.append(l); }
     const f = document.createElement('span');
@@ -754,7 +787,7 @@ function renderUsers() {
     f.textContent = (st.camera ? '📷' : '') + (extra.localMute ? '🔕' : '') +
       (st.deafened ? '🔇' : st.muted ? '🤐' : '') + (extra.connecting ? '⏳' : '');
     li.append(f);
-    if (!extra.me) li.addEventListener('click', (ev) => openPeerMenu(id, ev));
+    li.addEventListener('click', (ev) => (extra.me ? renameMe() : openPeerMenu(id, ev)));
     ul.append(li);
   };
   add('me', myName, { muted, deafened, sharing: !!screenStream, camera: !!camStream }, { me: true, role: myFlags });
@@ -818,7 +851,7 @@ function openPeerMenu(id, ev) {
   if (!p) return;
   openMenuPeer = id;
   const m = $('#peerMenu');
-  $('#pmName').textContent = p.name + roleMark(roster.get(id));
+  $('#pmName').textContent = p.name + loginNote(roster.get(id)) + roleMark(roster.get(id));
   $('#pmVol').value = p.voice; $('#pmVolVal').textContent = p.voice + '%';
   $('#pmScreenVol').value = p.screen; $('#pmScreenVal').textContent = p.screen + '%';
   $('#pmScreenRow').hidden = IS_MOBILE && !p.state.sharing;
@@ -852,7 +885,7 @@ function peerVolInput(key, valEl) {
     p[key] = +e.target.value;
     valEl.textContent = p[key] + '%';
     applyPeerVolume(p);
-    settings.peerVolumes[p.name] = { voice: p.voice, screen: p.screen };
+    settings.peerVolumes[p.volKey] = { voice: p.voice, screen: p.screen };
     save();
   };
 }
@@ -1173,6 +1206,7 @@ function applyAccount() {
   $('#btnShowReg').hidden = !!account || !registrationOpen;
   $('#btnLogout').hidden = !account;
   $('#rowName').hidden = !!account;
+  if (account && account.nick !== account.login) $('#whoText').textContent += ` · ник «${account.nick}»`;
   $('#inName').required = !account;
   refreshRooms();
 }

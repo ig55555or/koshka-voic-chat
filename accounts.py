@@ -81,6 +81,9 @@ class Store:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA foreign_keys=ON")
         self.db.executescript(SCHEMA)
+        # старые базы: ник появился позже (NULL — показывать логин)
+        if "nick" not in {r[1] for r in self.db.execute("PRAGMA table_info(users)")}:
+            self.db.execute("ALTER TABLE users ADD COLUMN nick TEXT")
         self.db.execute("DELETE FROM sessions WHERE expires < ?", (time.time(),))
 
     def drop_guest_rooms(self):
@@ -150,6 +153,9 @@ class Store:
 
     def delete_room(self, room_id: int):
         self.db.execute("DELETE FROM rooms WHERE id=?", (room_id,))
+
+    def set_nick(self, user_id: int, nick: str | None):
+        self.db.execute("UPDATE users SET nick=? WHERE id=?", (nick, user_id))
 
     def grant_access(self, user_id: int, room_id: int):
         self.db.execute("INSERT OR IGNORE INTO room_access (user_id, room_id) VALUES (?, ?)", (user_id, room_id))

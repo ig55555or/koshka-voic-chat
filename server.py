@@ -70,14 +70,16 @@ class Peer:
     def __init__(self, ws: web.WebSocketResponse, user):
         self.id = secrets.token_hex(6)
         self.ws = ws
-        self.name = user["login"] if user else ""
+        self.name = display_name(user) if user else ""
+        self.login = user["login"] if user else None     # настоящий логин виден всем — ник не подделать
         self.admin = bool(user and user["is_admin"])
+        self.renamed_at = 0.0
         self.guest = user is None
         self.room: Room | None = None
         self.state: dict = {}
 
     def info(self) -> dict:
-        return {"id": self.id, "name": self.name, "admin": self.admin, "guest": self.guest}
+        return {"id": self.id, "name": self.name, "login": self.login, "admin": self.admin, "guest": self.guest}
 
     async def send(self, msg: dict):
         if not self.ws.closed:
@@ -157,7 +159,23 @@ async def read_json(request: web.Request) -> dict:
 
 
 def user_json(user) -> dict:
-    return {"login": user["login"], "admin": bool(user["is_admin"])}
+    return {"login": user["login"], "admin": bool(user["is_admin"]), "nick": display_name(user)}
+
+
+def display_name(user) -> str:
+    return user["nick"] or user["login"]
+
+
+def check_nick(raw, user) -> tuple[str, str | None]:
+    """(ник, ошибка). Чужой логин занимать нельзя — иначе можно выдать себя за другого."""
+    name = accounts.clean_login(raw).replace("👑", "")
+    name = "".join(ch for ch in name if ch.isprintable()).strip()[:MAX_NAME]
+    if not name:
+        return name, "Введите имя"
+    owner = store.user_by_login(name)
+    if owner and (not user or owner["id"] != user["id"]):
+        return name, "Это имя занято аккаунтом. Войдите в него или выберите другое"
+    return name, None
 
 
 def start_session(request: web.Request, user):
@@ -338,18 +356,15 @@ async def ws_handler(request: web.Request):
                 # имя и права берём из аккаунта, а не из сообщения клиента
                 user = current_user(request)
                 if user:
-                    peer.name, peer.admin, peer.guest = user["login"], bool(user["is_admin"]), False
+                    peer.name, peer.login = display_name(user), user["login"]
+                    peer.admin, peer.guest = bool(user["is_admin"]), False
                 elif not peer.guest or not msg.get("guest"):
                     await peer.send({"type": "error", "message": "Сессия закончилась — войдите в аккаунт заново"})
                     continue
                 else:
-                    peer.name = accounts.clean_login(msg.get("name"))[:MAX_NAME]
-                    if not peer.name:
-                        await peer.send({"type": "error", "message": "Введите имя"})
-                        continue
-                    if store.user_by_login(peer.name):
-                        await peer.send({"type": "error",
-                                         "message": "Это имя занято аккаунтом. Войдите в него или выберите другое"})
+                    peer.name, err = check_nick(msg.get("name"), None)
+                    if err:
+                        await peer.send({"type": "error", "message": err})
                         continue
                 row = await open_room(user, str(msg.get("room", "")).strip()[:MAX_ROOM],
                                       str(msg.get("password", ""))[:128], ip)
@@ -381,6 +396,26 @@ async def ws_handler(request: web.Request):
                     peer.state = {k: bool(v) for k, v in st.items() if k in ("muted", "deafened", "sharing", "camera")}
                     await broadcast(peer.room, {"type": "state", "id": peer.id, "state": peer.state},
                                     exclude=peer.id)
+
+            elif kind == "rename" and peer.room:
+                if time.time() - peer.renamed_at < 2:
+                    await peer.send({"type": "error", "message": "Не так часто"})
+                    continue
+                peer.renamed_at = time.time()   # любая попытка, иначе можно перебирать чужие логины
+                user = None if peer.guest else current_user(request)
+                if not peer.guest and not user:
+                    await peer.send({"type": "error", "message": "Сессия закончилась — войдите в аккаунт заново"})
+                    continue
+                name, err = check_nick(msg.get("name"), user)
+                if err:
+                    await peer.send({"type": "error", "message": err})
+                    continue
+                if user:   # ник аккаунта запоминается для всех комнат
+                    store.set_nick(user["id"], None if name == user["login"] else name)
+                if name != peer.name:
+                    log.info("%s теперь %s", peer.name, name)
+                    peer.name = name
+                    await broadcast(peer.room, {"type": "renamed", "id": peer.id, "name": name})
 
             elif kind == "leave":
                 await leave(peer)
