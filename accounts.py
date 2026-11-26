@@ -82,8 +82,11 @@ class Store:
         self.db.execute("PRAGMA foreign_keys=ON")
         self.db.executescript(SCHEMA)
         # старые базы: ник появился позже (NULL — показывать логин)
-        if "nick" not in {r[1] for r in self.db.execute("PRAGMA table_info(users)")}:
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(users)")}
+        if "nick" not in cols:
             self.db.execute("ALTER TABLE users ADD COLUMN nick TEXT")
+        if "profile" not in cols:   # JSON: аватар, цвет, статус, о себе
+            self.db.execute("ALTER TABLE users ADD COLUMN profile TEXT")
         self.db.execute("DELETE FROM sessions WHERE expires < ?", (time.time(),))
 
     def drop_guest_rooms(self):
@@ -153,6 +156,9 @@ class Store:
 
     def delete_room(self, room_id: int):
         self.db.execute("DELETE FROM rooms WHERE id=?", (room_id,))
+
+    def set_profile(self, user_id: int, nick: str | None, profile: str):
+        self.db.execute("UPDATE users SET nick=?, profile=? WHERE id=?", (nick, profile, user_id))
 
     def set_nick(self, user_id: int, nick: str | None):
         self.db.execute("UPDATE users SET nick=? WHERE id=?", (nick, user_id))

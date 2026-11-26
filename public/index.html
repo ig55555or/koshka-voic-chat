@@ -34,7 +34,10 @@
 
     <!-- кто я -->
     <div id="whoRow" class="who-row">
-      <span id="whoText" class="muted"></span>
+      <button type="button" id="btnProfile" class="who-me" title="Мой профиль">
+        <span id="whoAvatar" class="avatar"></span>
+        <span class="who-me-text"><span id="whoText"></span><span class="who-me-hint">Профиль ›</span></span>
+      </button>
       <button type="button" id="btnShowLogin" class="btn">Войти</button>
       <button type="button" id="btnShowReg" class="btn">Регистрация</button>
       <button type="button" id="btnLogout" class="btn" hidden>Выйти</button>
@@ -73,7 +76,7 @@
         <div id="meName" class="me-name"></div>
         <div id="connStatus" class="me-status">Подключено</div>
       </div>
-      <button id="btnRename" class="icon-btn" title="Сменить ник" aria-label="Сменить ник">✏️</button>
+      <button id="btnRename" class="icon-btn" title="Мой профиль" aria-label="Мой профиль">✏️</button>
     </div>
   </aside>
 
@@ -113,7 +116,13 @@
 
 <!-- ============ Меню участника ============ -->
 <div id="peerMenu" class="popover" hidden>
-  <div class="pm-head"><span class="pm-name" id="pmName"></span><button id="pmClose" class="icon-btn mobile-only">✕</button></div>
+  <div id="pmBanner" class="pm-banner"><button id="pmClose" class="icon-btn pm-close mobile-only" aria-label="Закрыть">✕</button></div>
+  <div id="pmAvatar" class="avatar pm-avatar"></div>
+  <div class="pm-name" id="pmName"></div>
+  <div id="pmSub" class="pm-sub"></div>
+  <div id="pmStatus" class="pm-status" hidden></div>
+  <div id="pmAbout" class="pm-about" hidden></div>
+  <div class="pm-sec"></div>
   <label>Громкость голоса <span id="pmVolVal"></span>
     <input id="pmVol" type="range" min="0" max="400" step="1"></label>
   <label id="pmScreenRow">Громкость трансляции <span id="pmScreenVal"></span>
@@ -131,7 +140,7 @@
   <div class="modal-card">
     <header class="modal-head"><h2>Настройки</h2><button id="btnCloseSettings" class="icon-btn">✕</button></header>
 
-    <button id="btnRename2" class="btn">✏️ Сменить ник</button>
+    <button id="btnRename2" class="btn">👤 Мой профиль</button>
 
     <div class="grid2">
       <label>Микрофон<select id="selInput"></select></label>
@@ -188,6 +197,73 @@
         </select>
       </label>
     </div>
+  </div>
+</div>
+
+<!-- ============ Профиль ============ -->
+<div id="profile" class="sheet" hidden>
+  <div class="sheet-card" role="dialog" aria-modal="true" aria-labelledby="pfTitle">
+    <header class="sheet-head">
+      <button type="button" id="pfCancel" class="sheet-link">Отмена</button>
+      <h2 id="pfTitle">Профиль</h2>
+      <button type="button" id="pfSave" class="sheet-link strong">Готово</button>
+    </header>
+
+    <div class="pf-hero">
+      <div id="pfBanner" class="pf-banner"></div>
+      <div id="pfAvatarWrap" class="pf-avatar-wrap">
+        <div id="pfAvatar" class="avatar pf-avatar"></div>
+        <canvas id="pfCrop" class="pf-crop" width="320" height="320" hidden></canvas>
+        <button type="button" id="pfCamBtn" class="pf-cam" title="Выбрать фото" aria-label="Выбрать фото">📷</button>
+      </div>
+      <div id="pfPreviewName" class="pf-name"></div>
+      <div id="pfPreviewSub" class="pf-sub"></div>
+      <div id="pfPreviewStatus" class="pf-status-preview"></div>
+    </div>
+
+    <div id="pfZoomRow" class="pf-zoom" hidden>
+      <span aria-hidden="true">−</span>
+      <input id="pfZoom" type="range" min="1" max="4" step="0.01" value="1" aria-label="Масштаб фото">
+      <span aria-hidden="true">+</span>
+      <div class="pf-zoom-hint">Двигайте фото пальцем или мышью, чтобы выбрать кадр</div>
+    </div>
+
+    <section class="pf-group">
+      <div class="pf-label">Аватарка</div>
+      <div id="pfSeg" class="seg" role="tablist">
+        <span class="seg-thumb"></span>
+        <button type="button" role="tab" data-mode="photo">Фото</button>
+        <button type="button" role="tab" data-mode="emoji">Эмодзи</button>
+        <button type="button" role="tab" data-mode="letter">Буква</button>
+      </div>
+      <div id="pfPhotoPane" class="pf-pane">
+        <button type="button" id="pfPick" class="btn">🖼️ Выбрать фото…</button>
+        <button type="button" id="pfRemovePhoto" class="btn">Убрать</button>
+      </div>
+      <div id="pfEmojiPane" class="pf-pane" hidden>
+        <div id="pfEmojis" class="pf-emojis"></div>
+        <label class="pf-inline">Свой эмодзи<input id="pfEmojiCustom" maxlength="16" placeholder="🙂" autocomplete="off"></label>
+      </div>
+    </section>
+
+    <section class="pf-group">
+      <div class="pf-label">Цвет</div>
+      <div id="pfColors" class="pf-colors" role="radiogroup" aria-label="Цвет профиля"></div>
+    </section>
+
+    <section class="pf-group">
+      <label class="pf-field">Ник<input id="pfName" maxlength="32" autocomplete="nickname"></label>
+      <label class="pf-field">Статус<input id="pfStatus" maxlength="60" placeholder="Чем заняты?" autocomplete="off"></label>
+      <div id="pfChips" class="pf-chips"></div>
+      <label class="pf-field">О себе
+        <textarea id="pfAbout" maxlength="160" rows="3" placeholder="Пара слов о себе"></textarea>
+        <span id="pfAboutCount" class="pf-count"></span>
+      </label>
+    </section>
+
+    <p id="pfNote" class="pf-note"></p>
+    <p id="pfError" class="error pf-error" hidden></p>
+    <input id="pfFile" type="file" accept="image/*" hidden>
   </div>
 </div>
 

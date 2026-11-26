@@ -21,6 +21,7 @@ const DEFAULTS = {
   nsMode: 'rnnoise', echo: true, agc: false, gate: -60, leveler: true,
   screenQuality: '1080p30', camQuality: '720p',
   theme: 'dark', cats: false,
+  profile: null,     // профиль гостя (у аккаунта — на сервере)
   peerVolumes: {},   // по имени: { voice, screen }
 };
 const settings = (() => {
@@ -54,7 +55,8 @@ let unread = 0;
 const peers = new Map();     // id -> peer
 const roster = new Map();    // id -> { name, admin, guest } (из сигналинга)
 let account = null;          // { login, admin } или null — гость
-let myName = '', myFlags = null;
+let myName = '', myFlags = null, myProfile = null;
+let profileWaiter = null;    // ждём подтверждения сохранения профиля в комнате
 let kicked = false;
 const roleMark = (r) => (r?.admin ? ' 👑' : r?.guest ? ' · гость' : '');
 // у аккаунтов рядом с ником показываем логин — чтобы ником нельзя было выдать себя за другого
@@ -296,7 +298,8 @@ function connect(room, password) {
   return new Promise((resolve, reject) => {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     ws = new WebSocket(`${proto}://${location.host}/ws`);
-    ws.onopen = () => send({ type: 'join', room, password, guest: !account, name: account ? undefined : settings.name });
+    ws.onopen = () => send({ type: 'join', room, password, guest: !account,
+      name: account ? undefined : settings.name, profile: account ? undefined : settings.profile });
     ws.onerror = () => reject(new Error('Нет связи с сервером'));
     ws.onclose = () => {
       if (kicked) return;
@@ -306,7 +309,9 @@ function connect(room, password) {
       const msg = JSON.parse(ev.data);
       switch (msg.type) {
         case 'error':
-          if (!myId) { reject(new Error(msg.message)); ws.close(); } else toast(msg.message);
+          if (!myId) { reject(new Error(msg.message)); ws.close(); }
+          else if (profileWaiter) profileWaiter.reject(new Error(msg.message));
+          else toast(msg.message);
           break;
         case 'kicked':
           kicked = true;
@@ -317,6 +322,7 @@ function connect(room, password) {
           myId = msg.id;
           myName = msg.name;
           myFlags = msg;
+          myProfile = msg.profile || null;
           resolve();
           for (const p of msg.peers) {
             roster.set(p.id, p);
@@ -329,24 +335,10 @@ function connect(room, password) {
           roster.set(msg.id, msg);
           sysMsg(`${msg.name}${loginNote(msg)}${roleText(msg)} в комнате`); joinSound(true);
           break;
-        case 'renamed': {
-          if (msg.id === myId) {
-            myName = msg.name;
-            if (account) account.nick = msg.name; else { settings.name = msg.name; save(); }
-            $('#meName').textContent = myName + roleMark(myFlags);
-            makeAvatar(myName, $('#meAvatar'));
-            sysMsg(`Теперь вас зовут «${myName}»`);
-          } else {
-            const p = peers.get(msg.id), r = roster.get(msg.id);
-            const old = p?.name || r?.name || 'Кто-то';
-            if (r) r.name = msg.name;
-            if (p) p.name = msg.name;
-            sysMsg(`${old} теперь «${msg.name}»`);
-            if (openMenuPeer === msg.id && p) $('#pmName').textContent = p.name + loginNote(r) + roleMark(r);
-          }
-          renderUsers(); renderStage();
+        case 'renamed':
+        case 'profile':
+          applyProfileMsg(msg);
           break;
-        }
         case 'peer-left': {
           const p = peers.get(msg.id);
           sysMsg(`${p?.name || roster.get(msg.id)?.name || 'Кто-то'}: связь завершена`); joinSound(false);
@@ -438,7 +430,7 @@ function createPeer(id, name, initiator) {
   p.dc.onmessage = (e) => {
     try {
       const m = JSON.parse(e.data);
-      if (m.type === 'chat' && typeof m.text === 'string') chatMsg(p.name, m.text.slice(0, 2000), false);
+      if (m.type === 'chat' && typeof m.text === 'string') chatMsg(p.name, m.text.slice(0, 2000), false, roster.get(p.id)?.profile);
     } catch {}
   };
 
@@ -749,23 +741,27 @@ function colorFor(name) {
   for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
   return COLORS[h % COLORS.length];
 }
-function makeAvatar(name, el = document.createElement('div')) {
-  el.className = 'avatar';
-  el.style.background = colorFor(name);
-  el.textContent = (name.trim()[0] || '?').toUpperCase();
+// фото → эмодзи → первая буква; фон — выбранный градиент или цвет по нику
+function makeAvatar(name, el = document.createElement('div'), prof = null, extraClass = '') {
+  const speaking = el.classList.contains('speaking');
+  el.className = 'avatar' + (extraClass ? ' ' + extraClass : '');
+  const bg = profileBg(name, prof);
+  if (prof?.photo) {
+    el.classList.add('photo');
+    el.style.background = `center / cover no-repeat url("${prof.photo}")`;
+    el.style.setProperty('--ear', prof.color >= 0 ? GRADIENTS[prof.color][0] : bg);
+    el.textContent = '';
+  } else {
+    el.style.background = bg;
+    if (prof?.emoji) { el.classList.add('emoji'); el.textContent = prof.emoji; }
+    else el.textContent = ([...(name || '').trim()][0] || '?').toUpperCase();
+  }
+  if (speaking) el.classList.add('speaking');
   return el;
 }
 
-function renameMe() {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  const name = prompt('Новый ник (его увидят все в комнате):', myName);
-  if (name == null) return;
-  const v = name.trim().slice(0, 32);
-  if (!v || v === myName) return;
-  send({ type: 'rename', name: v });
-}
-$('#btnRename').onclick = renameMe;
-$('#btnRename2').onclick = () => { $('#settings').hidden = true; renameMe(); };
+$('#btnRename').onclick = () => openProfile();
+$('#btnRename2').onclick = () => openProfile();
 
 function renderUsers() {
   const ul = $('#userList');
@@ -774,25 +770,29 @@ function renderUsers() {
     const li = document.createElement('li');
     li.className = 'user' + (extra.connecting ? ' connecting' : '');
     li.dataset.id = id;
-    const av = makeAvatar(name);
+    const av = makeAvatar(name, undefined, extra.prof);
     av.dataset.speak = id;
     const n = document.createElement('span');
     n.className = 'uname';
     n.textContent = name + loginNote(extra.role ? { ...extra.role, name } : null) + roleMark(extra.role) + (extra.me ? ' (вы)' : '');
-    if (extra.me) li.title = 'Нажмите, чтобы сменить ник';
-    li.append(av, n);
+    if (extra.me) li.title = 'Мой профиль';
+    const tx = document.createElement('div'); tx.className = 'utext'; tx.append(n);
+    if (extra.prof?.status) {
+      const su = document.createElement('span'); su.className = 'ustatus'; su.textContent = extra.prof.status; tx.append(su);
+    }
+    li.append(av, tx);
     if (st.sharing) { const l = document.createElement('span'); l.className = 'live'; l.textContent = 'В ЭФИРЕ'; li.append(l); }
     const f = document.createElement('span');
     f.className = 'flags';
     f.textContent = (st.camera ? '📷' : '') + (extra.localMute ? '🔕' : '') +
       (st.deafened ? '🔇' : st.muted ? '🤐' : '') + (extra.connecting ? '⏳' : '');
     li.append(f);
-    li.addEventListener('click', (ev) => (extra.me ? renameMe() : openPeerMenu(id, ev)));
+    li.addEventListener('click', (ev) => (extra.me ? openProfile() : openPeerMenu(id, ev)));
     ul.append(li);
   };
-  add('me', myName, { muted, deafened, sharing: !!screenStream, camera: !!camStream }, { me: true, role: myFlags });
+  add('me', myName, { muted, deafened, sharing: !!screenStream, camera: !!camStream }, { me: true, role: myFlags, prof: myProfile });
   for (const p of peers.values()) {
-    add(p.id, p.name, p.state, { role: roster.get(p.id), localMute: p.localMute, connecting: p.pc.connectionState !== 'connected' });
+    add(p.id, p.name, p.state, { role: roster.get(p.id), prof: roster.get(p.id)?.profile, localMute: p.localMute, connecting: p.pc.connectionState !== 'connected' });
   }
 }
 
@@ -851,7 +851,7 @@ function openPeerMenu(id, ev) {
   if (!p) return;
   openMenuPeer = id;
   const m = $('#peerMenu');
-  $('#pmName').textContent = p.name + loginNote(roster.get(id)) + roleMark(roster.get(id));
+  fillPeerCard(id);
   $('#pmVol').value = p.voice; $('#pmVolVal').textContent = p.voice + '%';
   $('#pmScreenVol').value = p.screen; $('#pmScreenVal').textContent = p.screen + '%';
   $('#pmScreenRow').hidden = IS_MOBILE && !p.state.sharing;
@@ -863,6 +863,17 @@ function openPeerMenu(id, ev) {
   m.style.left = Math.max(8, Math.min(r.right + 8, innerWidth - m.offsetWidth - 8)) + 'px';
   m.style.top = Math.max(8, Math.min(r.top, innerHeight - m.offsetHeight - 8)) + 'px';
   ev.stopPropagation();
+}
+function fillPeerCard(id) {
+  const p = peers.get(id), r = roster.get(id) || {};
+  if (!p) return;
+  const prof = r.profile;
+  $('#pmBanner').style.background = profileBg(p.name, prof);
+  makeAvatar(p.name, $('#pmAvatar'), prof, 'pm-avatar');
+  $('#pmName').textContent = p.name;
+  $('#pmSub').textContent = [r.login ? '@' + r.login : 'гость', r.admin ? '👑 администратор' : ''].filter(Boolean).join(' · ');
+  $('#pmStatus').textContent = prof?.status || ''; $('#pmStatus').hidden = !prof?.status;
+  $('#pmAbout').textContent = prof?.about || ''; $('#pmAbout').hidden = !prof?.about;
 }
 function connText(p) {
   const s = p.pc.connectionState;
@@ -938,13 +949,13 @@ function updateBadge() {
   $('#chatBadge').hidden = unread === 0;
   $('#chatBadge').textContent = unread > 9 ? '9+' : String(unread);
 }
-function chatMsg(name, text, mine) {
+function chatMsg(name, text, mine, prof = null) {
   const log = $('#chatLog');
   const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
   const d = document.createElement('div'); d.className = 'msg';
   const t = document.createElement('time'); t.textContent = new Date().toLocaleTimeString().slice(0, 5);
   const b = document.createElement('b'); b.textContent = name; b.style.color = colorFor(name);
-  d.append(t, b, document.createTextNode(text));
+  d.append(t, makeAvatar(name, undefined, prof, 'mini'), b, document.createTextNode(text));
   log.append(d);
   if (atBottom || mine) log.scrollTop = log.scrollHeight;
   if (!mine) {
@@ -963,7 +974,7 @@ $('#chatForm').addEventListener('submit', (e) => {
   const payload = JSON.stringify({ type: 'chat', text });
   let sent = 0;
   for (const p of peers.values()) if (p.dc.readyState === 'open') { p.dc.send(payload); sent++; }
-  chatMsg(myName, text, true);
+  chatMsg(myName, text, true, myProfile);
   if (!sent && peers.size === 0) sysMsg('В комнате пока никого нет');
   $('#chatInput').value = '';
 });
@@ -1154,7 +1165,7 @@ async function enterRoom(room, password) {
     $('#app').hidden = false;
     $('#roomName').textContent = settings.room;
     $('#meName').textContent = myName + roleMark(myFlags);
-    makeAvatar(myName, $('#meAvatar')).id = 'meAvatar';
+    makeAvatar(myName, $('#meAvatar'), myProfile);
     $('#meAvatar').dataset.speak = 'me-panel';
     applyMute(); updateMediaButtons(); broadcastState(); renderUsers();
     requestWakeLock();
@@ -1201,12 +1212,11 @@ function showAuth(mode) {
 }
 function applyAccount() {
   showAuth(null);
-  $('#whoText').textContent = account ? (account.admin ? '👑 ' : '👤 ') + account.login : 'Вы гость';
+  updateWho();
   $('#btnShowLogin').hidden = !!account;
   $('#btnShowReg').hidden = !!account || !registrationOpen;
   $('#btnLogout').hidden = !account;
   $('#rowName').hidden = !!account;
-  if (account && account.nick !== account.login) $('#whoText').textContent += ` · ник «${account.nick}»`;
   $('#inName').required = !account;
   refreshRooms();
 }
@@ -1300,3 +1310,313 @@ async function refreshRooms() {
 }
 setInterval(() => { if (!document.hidden && !entering && !$('#login').hidden) refreshRooms(); }, 5000);
 loadAccount();
+
+// ------------------------------------------------------------------ профиль
+const GRADIENTS = [
+  ['#7b6cff', '#c86bff'], ['#ff5f8f', '#ffa45c'], ['#2bc0e4', '#3a7bd5'], ['#34d27b', '#a8e063'],
+  ['#f7971e', '#ffd200'], ['#ff6fb1', '#ffc2dc'], ['#00c6ff', '#0062ff'], ['#3ee8b5', '#0f9b8e'],
+  ['#a18cd1', '#fbc2eb'], ['#ff512f', '#dd2476'], ['#5b6378', '#1f232d'], ['#f6d365', '#fda085'],
+];
+const EMOJIS = ['🐱', '😺', '😼', '🦊', '🐼', '🐸', '🐧', '🦄', '🐙', '🐝', '🦋', '🐶',
+  '🌸', '🌙', '⭐', '🔥', '⚡', '🍓', '🍑', '🍕', '🎮', '🎧', '👾', '👻'];
+const STATUS_CHIPS = ['🎮 Играю', '🎧 Слушаю музыку', '📚 Учусь', '💼 Работаю', '🍿 Смотрю кино', '💤 Отошёл', '🐱 Глажу кота'];
+const MODES = ['photo', 'emoji', 'letter'];
+const CROP = 320;            // внутренний размер холста обрезки
+const PHOTO_SIZE = 256;      // итоговая аватарка
+
+function profileBg(name, prof) {
+  const c = prof?.color ?? -1;
+  return c >= 0 && GRADIENTS[c] ? `linear-gradient(135deg, ${GRADIENTS[c][0]}, ${GRADIENTS[c][1]})` : colorFor(name || '?');
+}
+const inRoom = () => !!(myId && ws && ws.readyState === WebSocket.OPEN);
+const currentName = () => (inRoom() ? myName : account ? (account.nick || account.login) : ($('#inName').value.trim() || settings.name || ''));
+const currentProfile = () => (inRoom() ? myProfile : account ? account.profile : settings.profile) || {};
+
+function updateWho() {
+  const name = currentName() || 'Гость';
+  makeAvatar(name, $('#whoAvatar'), currentProfile());
+  $('#whoText').textContent = (account?.admin ? '👑 ' : '') + name;
+  $('.who-me-hint').textContent = (account ? '@' + account.login : 'гость') + ' · профиль ›';
+}
+$('#inName').addEventListener('input', () => { if (!account) updateWho(); });
+$('#btnProfile').onclick = () => openProfile();
+
+function applyProfileMsg(msg) {
+  if (msg.id === myId) {
+    const was = myName;
+    myName = msg.name;
+    if (msg.profile) myProfile = msg.profile;
+    myFlags = { ...myFlags, name: myName, profile: myProfile };
+    if (account) { account.nick = myName; account.profile = myProfile; }
+    else { settings.name = myName; settings.profile = myProfile; save(); $('#inName').value = myName; }
+    $('#meName').textContent = myName + roleMark(myFlags);
+    makeAvatar(myName, $('#meAvatar'), myProfile);
+    if (was !== myName) sysMsg(`Теперь вас зовут «${myName}»`);
+    profileWaiter?.resolve();
+  } else {
+    const p = peers.get(msg.id), r = roster.get(msg.id);
+    const old = p?.name || r?.name;
+    if (r) { r.name = msg.name; if (msg.profile) r.profile = msg.profile; }
+    if (p) p.name = msg.name;
+    if (old && old !== msg.name) sysMsg(`${old} теперь «${msg.name}»`);
+    if (openMenuPeer === msg.id) fillPeerCard(msg.id);
+  }
+  renderUsers(); renderStage();
+}
+
+// --- редактор
+let draft = null;     // { name, emoji, color, photo, status, about, mode }
+let crop = null;      // { img, w, h, zoom, x, y } — пока выбираем кадр нового фото
+
+function draftProfile() {
+  const photo = draft.mode === 'photo' ? draft.photo : '';
+  return { emoji: draft.mode === 'emoji' ? draft.emoji : '', color: draft.color, photo,
+    status: draft.status.trim(), about: draft.about.trim() };
+}
+
+function buildProfileUi() {
+  const em = $('#pfEmojis');
+  for (const e of EMOJIS) {
+    const b = document.createElement('button'); b.type = 'button'; b.className = 'pf-emoji'; b.textContent = e;
+    b.setAttribute('aria-label', 'Эмодзи ' + e);
+    b.onclick = () => { draft.emoji = e; $('#pfEmojiCustom').value = ''; renderProfilePreview(true); };
+    em.append(b);
+  }
+  const cs = $('#pfColors');
+  for (let i = -1; i < GRADIENTS.length; i++) {
+    const b = document.createElement('button'); b.type = 'button'; b.className = 'pf-swatch' + (i < 0 ? ' auto' : '');
+    b.setAttribute('role', 'radio'); b.dataset.c = i;
+    b.setAttribute('aria-label', i < 0 ? 'Цвет по нику' : 'Цвет ' + (i + 1));
+    if (i >= 0) b.style.background = `linear-gradient(135deg, ${GRADIENTS[i][0]}, ${GRADIENTS[i][1]})`;
+    b.onclick = () => { draft.color = i; renderProfilePreview(); };
+    cs.append(b);
+  }
+  const ch = $('#pfChips');
+  for (const t of STATUS_CHIPS) {
+    const b = document.createElement('button'); b.type = 'button'; b.className = 'pf-chip'; b.textContent = t;
+    b.onclick = () => { draft.status = $('#pfStatus').value = t; renderProfilePreview(); };
+    ch.append(b);
+  }
+  const x = document.createElement('button'); x.type = 'button'; x.className = 'pf-chip'; x.textContent = '✕ Без статуса';
+  x.onclick = () => { draft.status = $('#pfStatus').value = ''; renderProfilePreview(); };
+  ch.append(x);
+
+  $$('#pfSeg button').forEach((b) => {
+    b.onclick = () => {
+      const m = b.dataset.mode;
+      if (m === 'photo' && !draft.photo && !crop) { $('#pfFile').click(); return; }
+      setMode(m);
+    };
+  });
+  $('#pfName').oninput = (e) => { draft.name = e.target.value; renderProfilePreview(); };
+  $('#pfStatus').oninput = (e) => { draft.status = e.target.value; renderProfilePreview(); };
+  $('#pfAbout').oninput = (e) => { draft.about = e.target.value; renderProfilePreview(); };
+  $('#pfEmojiCustom').oninput = (e) => {
+    const v = e.target.value.trim();
+    if (v) { draft.emoji = [...v].slice(0, 8).join(''); renderProfilePreview(true); }
+  };
+  $('#pfPick').onclick = () => $('#pfFile').click();
+  $('#pfCamBtn').onclick = () => $('#pfFile').click();
+  $('#pfRemovePhoto').onclick = () => { draft.photo = ''; crop = null; setMode(draft.emoji ? 'emoji' : 'letter'); };
+  $('#pfFile').onchange = onPhotoPicked;
+  $('#pfZoom').oninput = (e) => { if (crop) { crop.zoom = +e.target.value; clampCrop(); drawCrop(); } };
+  $('#pfCancel').onclick = closeProfile;
+  $('#pfSave').onclick = saveProfile;
+  $('#profile').addEventListener('click', (e) => { if (e.target.id === 'profile') closeProfile(); });
+  document.addEventListener('keydown', (e) => {
+    if ($('#profile').hidden) return;
+    if (e.key === 'Escape') closeProfile();
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) saveProfile();
+  });
+  setupCropGestures();
+}
+
+function openProfile() {
+  const prof = currentProfile();
+  draft = {
+    name: currentName(), emoji: prof.emoji || '', color: prof.color ?? -1, photo: prof.photo || '',
+    status: prof.status || '', about: prof.about || '', mode: prof.photo ? 'photo' : prof.emoji ? 'emoji' : 'letter',
+  };
+  crop = null;
+  $('#pfName').value = draft.name; $('#pfStatus').value = draft.status; $('#pfAbout').value = draft.about;
+  $('#pfEmojiCustom').value = draft.emoji && !EMOJIS.includes(draft.emoji) ? draft.emoji : '';
+  $('#pfError').hidden = true;
+  $('#pfNote').textContent = account
+    ? 'Профиль видят все, с кем вы в комнате. Сохраняется в аккаунте и работает на всех устройствах.'
+    : 'Вы гость: профиль хранится только в этом браузере. Зарегистрируйтесь, чтобы он был с вами везде.';
+  setMode(draft.mode, false);
+  closePeerMenu();
+  $('#settings').hidden = true;
+  if (!$('#app').hidden) setChatOpen(false);
+  const sh = $('#profile');
+  sh.hidden = false;
+  sh.querySelector('.sheet-card').scrollTop = 0;
+  requestAnimationFrame(() => requestAnimationFrame(() => sh.classList.add('open')));
+}
+function closeProfile() {
+  const sh = $('#profile');
+  if (sh.hidden) return;
+  sh.classList.remove('open');
+  setTimeout(() => { if (!sh.classList.contains('open')) sh.hidden = true; }, 320);
+  crop = null;
+}
+
+function setMode(mode, animate = true) {
+  draft.mode = mode;
+  const seg = $('#pfSeg');
+  seg.dataset.i = MODES.indexOf(mode);
+  seg.querySelectorAll('button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.mode === mode)));
+  $('#pfPhotoPane').hidden = mode !== 'photo';
+  $('#pfEmojiPane').hidden = mode !== 'emoji';
+  if (mode === 'emoji' && !draft.emoji) draft.emoji = EMOJIS[0];
+  renderProfilePreview(animate);
+}
+
+function renderProfilePreview(pop = false) {
+  const prof = draftProfile();
+  const cropping = !!crop && draft.mode === 'photo';
+  $('#pfBanner').style.background = profileBg(draft.name, prof);
+  const av = makeAvatar(draft.name || '?', $('#pfAvatar'), cropping ? null : prof, 'pf-avatar');
+  if (pop) { av.classList.remove('pop'); void av.offsetWidth; av.classList.add('pop'); }
+  av.style.visibility = cropping ? 'hidden' : '';
+  $('#pfCrop').hidden = !cropping;
+  $('#pfZoomRow').hidden = !cropping;
+  $('#pfPreviewName').textContent = draft.name.trim() || 'Без имени';
+  $('#pfPreviewSub').textContent = account ? '@' + account.login + (account.admin ? ' · 👑 администратор' : '') : 'гость';
+  $('#pfPreviewStatus').textContent = draft.status.trim();
+  $('#pfAboutCount').textContent = `${draft.about.length}/160`;
+  const hasPhoto = !!(draft.photo || crop);
+  $('#pfRemovePhoto').hidden = !hasPhoto;
+  $('#pfPick').textContent = hasPhoto ? '🖼️ Другое фото…' : '🖼️ Выбрать фото…';
+  $$('#pfEmojis .pf-emoji').forEach((b) => b.setAttribute('aria-pressed', String(b.textContent === draft.emoji)));
+  $$('#pfColors .pf-swatch').forEach((b) => {
+    b.setAttribute('aria-checked', String(+b.dataset.c === draft.color));
+    if (b.classList.contains('auto')) b.style.background = colorFor(draft.name || '?');
+  });
+}
+
+function pfError(text) { $('#pfError').textContent = text; $('#pfError').hidden = false; }
+
+// --- фото: выбор, кадрирование пальцем/мышью, сжатие
+async function onPhotoPicked(e) {
+  const f = e.target.files[0];
+  e.target.value = '';
+  if (!f) return;
+  $('#pfError').hidden = true;
+  if (f.type && !f.type.startsWith('image/')) return pfError('Это не картинка');
+  if (f.size > 30e6) return pfError('Файл слишком большой (больше 30 МБ)');
+  try {
+    let img;
+    try { img = await createImageBitmap(f, { imageOrientation: 'from-image' }); }
+    catch {
+      const url = URL.createObjectURL(f);
+      img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+    }
+    const w = img.width || img.naturalWidth, h = img.height || img.naturalHeight;
+    if (!w || !h) throw new Error();
+    crop = { img, w, h, zoom: 1, x: 0, y: 0 };
+    $('#pfZoom').value = 1;
+    setMode('photo');
+    drawCrop();
+  } catch { pfError('Не получилось открыть фото. Попробуйте JPG или PNG.'); }
+}
+const cropScale = () => Math.max(CROP / crop.w, CROP / crop.h) * crop.zoom;
+function clampCrop() {
+  const s = cropScale();
+  const mx = Math.max(0, (crop.w * s - CROP) / 2), my = Math.max(0, (crop.h * s - CROP) / 2);
+  crop.x = Math.min(mx, Math.max(-mx, crop.x));
+  crop.y = Math.min(my, Math.max(-my, crop.y));
+}
+function drawCrop(canvas = $('#pfCrop'), size = CROP) {
+  if (!crop) return;
+  const c = canvas.getContext('2d');
+  const k = size / CROP, s = cropScale() * k;
+  const dw = crop.w * s, dh = crop.h * s;
+  c.imageSmoothingEnabled = true; c.imageSmoothingQuality = 'high';
+  c.fillStyle = '#000'; c.fillRect(0, 0, size, size);
+  c.drawImage(crop.img, (size - dw) / 2 + crop.x * k, (size - dh) / 2 + crop.y * k, dw, dh);
+}
+function exportCrop() {
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = PHOTO_SIZE;
+  drawCrop(cv, PHOTO_SIZE);
+  let q = 0.9, url;
+  do { url = cv.toDataURL('image/jpeg', q); q -= 0.08; } while (url.length > 76000 && q > 0.3);
+  return url.startsWith('data:image/jpeg;base64,') ? url : '';
+}
+function setupCropGestures() {
+  const cv = $('#pfCrop');
+  const pts = new Map();
+  let pinch = null;
+  const ratio = () => CROP / cv.getBoundingClientRect().width;
+  cv.addEventListener('pointerdown', (e) => { cv.setPointerCapture(e.pointerId); pts.set(e.pointerId, { x: e.clientX, y: e.clientY }); });
+  cv.addEventListener('pointermove', (e) => {
+    if (!crop || !pts.has(e.pointerId)) return;
+    const prev = pts.get(e.pointerId);
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pts.size === 2) {   // щипок двумя пальцами — масштаб
+      const [a, b] = [...pts.values()];
+      const d = Math.hypot(a.x - b.x, a.y - b.y);
+      if (!pinch) pinch = { d, zoom: crop.zoom };
+      crop.zoom = Math.min(4, Math.max(1, pinch.zoom * d / pinch.d));
+      $('#pfZoom').value = crop.zoom;
+    } else {
+      crop.x += (e.clientX - prev.x) * ratio();
+      crop.y += (e.clientY - prev.y) * ratio();
+    }
+    clampCrop(); drawCrop();
+  });
+  const up = (e) => { pts.delete(e.pointerId); if (pts.size < 2) pinch = null; };
+  cv.addEventListener('pointerup', up);
+  cv.addEventListener('pointercancel', up);
+  cv.addEventListener('wheel', (e) => {
+    if (!crop) return;
+    e.preventDefault();
+    crop.zoom = Math.min(4, Math.max(1, crop.zoom * (e.deltaY < 0 ? 1.08 : 1 / 1.08)));
+    $('#pfZoom').value = crop.zoom;
+    clampCrop(); drawCrop();
+  }, { passive: false });
+}
+
+async function saveProfile() {
+  const btn = $('#pfSave');
+  if (btn.disabled) return;
+  const name = $('#pfName').value.trim();
+  if (!name) { pfError('Введите ник'); $('#pfName').focus(); return; }
+  if (crop && draft.mode === 'photo') {
+    draft.photo = exportCrop();
+    if (!draft.photo) { pfError('Браузер не смог сжать фото'); return; }
+  }
+  if (draft.mode === 'photo' && !draft.photo) draft.mode = 'letter';
+  draft.name = name;
+  const prof = draftProfile();
+  btn.disabled = true;
+  $('#pfError').hidden = true;
+  try {
+    if (inRoom()) {
+      await new Promise((resolve, reject) => {
+        profileWaiter = { resolve, reject };
+        send({ type: 'profile', name, profile: prof });
+        setTimeout(() => reject(new Error('Сервер не ответил, попробуйте ещё раз')), 8000);
+      });
+    } else if (account) {
+      const r = await api('profile', { name, profile: prof });
+      account = r.user;
+    } else {
+      settings.name = name; settings.profile = prof; save();
+      $('#inName').value = name;
+    }
+    crop = null;
+    updateWho();
+    closeProfile();
+    toast('Профиль сохранён ✨');
+    if (settings.cats) meow(0.4);
+  } catch (e) {
+    pfError(e.message);
+  } finally {
+    btn.disabled = false;
+    profileWaiter = null;
+  }
+}
+buildProfileUi();
+updateWho();

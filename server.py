@@ -16,6 +16,7 @@ Voice chat — сигнальный сервер.
 import argparse
 import asyncio
 import base64
+import binascii
 import datetime
 import getpass
 import hashlib
@@ -28,6 +29,7 @@ import secrets
 import socket
 import ssl
 import sys
+import unicodedata
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -74,12 +76,14 @@ class Peer:
         self.login = user["login"] if user else None     # настоящий логин виден всем — ник не подделать
         self.admin = bool(user and user["is_admin"])
         self.renamed_at = 0.0
+        self.profile = load_profile(user) if user else dict(EMPTY_PROFILE)
         self.guest = user is None
         self.room: Room | None = None
         self.state: dict = {}
 
     def info(self) -> dict:
-        return {"id": self.id, "name": self.name, "login": self.login, "admin": self.admin, "guest": self.guest}
+        return {"id": self.id, "name": self.name, "login": self.login, "admin": self.admin, "guest": self.guest,
+                "profile": self.profile}
 
     async def send(self, msg: dict):
         if not self.ws.closed:
@@ -114,6 +118,7 @@ class Limiter:
 login_limit = Limiter(10, 60)        # попыток входа с одного IP
 room_limit = Limiter(10, 60)         # попыток пароля комнаты с одного IP
 register_limit = Limiter(10, 3600)   # регистраций с одного IP
+profile_limit = Limiter(20, 60)      # сохранений профиля одним аккаунтом
 
 
 async def hash_pw(password: str) -> str:
@@ -159,7 +164,81 @@ async def read_json(request: web.Request) -> dict:
 
 
 def user_json(user) -> dict:
-    return {"login": user["login"], "admin": bool(user["is_admin"]), "nick": display_name(user)}
+    return {"login": user["login"], "admin": bool(user["is_admin"]), "nick": display_name(user),
+            "profile": load_profile(user)}
+
+
+# ---------------------------------------------------------------- профиль
+PROFILE_COLORS = 12          # градиенты на клиенте; -1 — цвет по нику
+PHOTO_MAX = 80_000           # data:-URL аватарки (клиент сжимает до 256×256 JPEG ≈ 20–40 КБ)
+JPEG_PREFIX = "data:image/jpeg;base64,"
+
+
+def _clean_text(raw, limit: int) -> str:
+    s = unicodedata.normalize("NFKC", str(raw or ""))
+    return " ".join("".join(ch for ch in s if ch.isprintable()).split())[:limit]
+
+
+def clean_profile(data) -> tuple[dict, str | None]:
+    """Проверенный профиль либо ошибка. Всё, что уходит другим участникам, проходит здесь."""
+    if not isinstance(data, dict):
+        data = {}
+    # эмодзи: без управляющих символов и пробелов, но со склейкой (ZWJ) для составных эмодзи
+    emoji = "".join(ch for ch in str(data.get("emoji") or "")
+                    if ch == "\u200d" or not unicodedata.category(ch).startswith(("C", "Z")))[:16]
+    try:
+        color = int(data.get("color", -1))
+    except (TypeError, ValueError):
+        color = -1
+    if not -1 <= color < PROFILE_COLORS:
+        color = -1
+    photo = data.get("photo") or ""
+    if photo:
+        if not isinstance(photo, str) or len(photo) > PHOTO_MAX or not photo.startswith(JPEG_PREFIX):
+            return {}, "Фото слишком большое или не того формата"
+        try:
+            raw = base64.b64decode(photo[len(JPEG_PREFIX):], validate=True)
+        except (binascii.Error, ValueError):
+            return {}, "Фото повреждено"
+        if not raw.startswith(b"\xff\xd8\xff"):
+            return {}, "Фото повреждено"
+    return {"emoji": emoji, "color": color, "photo": photo,
+            "status": _clean_text(data.get("status"), 60), "about": _clean_text(data.get("about"), 160)}, None
+
+
+EMPTY_PROFILE = clean_profile({})[0]
+
+
+def load_profile(user) -> dict:
+    try:
+        prof, err = clean_profile(json.loads(user["profile"] or "{}"))
+    except (ValueError, TypeError):
+        return dict(EMPTY_PROFILE)
+    return dict(EMPTY_PROFILE) if err else prof
+
+
+def live_peers_of(login: str) -> list:
+    return [p for r in rooms.values() for p in r.peers.values() if p.login == login]
+
+
+async def push_profile(peers_list, name: str, profile: dict):
+    """Новый ник/профиль — сразу всем в комнатах, где сейчас этот человек."""
+    for p in peers_list:
+        p.name, p.profile = name, profile
+        if p.room:
+            await broadcast(p.room, {"type": "profile", "id": p.id, "name": name, "profile": profile})
+
+
+async def save_profile(user, data) -> tuple[str, dict, str | None]:
+    name, err = check_nick(data.get("name"), user)
+    if err:
+        return name, {}, err
+    prof, err = clean_profile(data.get("profile"))
+    if err:
+        return name, {}, err
+    if user:
+        store.set_profile(user["id"], None if name == user["login"] else name, json.dumps(prof, ensure_ascii=False))
+    return name, prof, None
 
 
 def display_name(user) -> str:
@@ -268,6 +347,22 @@ async def api_room_delete(request: web.Request):
     return web.json_response({})
 
 
+async def api_profile(request: web.Request):
+    data = await read_json(request)
+    user = current_user(request)
+    if not user:
+        return api_error("Войдите в аккаунт", 401)
+    key = f"u{user['id']}"
+    if profile_limit.blocked(key):
+        return api_error("Не так часто — подождите минуту", 429)
+    profile_limit.hit(key)
+    name, prof, err = await save_profile(user, data)
+    if err:
+        return api_error(err, 400)
+    await push_profile(live_peers_of(user["login"]), name, prof)
+    return web.json_response({"user": user_json(store.user_by_login(user["login"]))})
+
+
 async def api_room_forget(request: web.Request):
     """Забыть пароль чужой комнаты: дальше снова спросит пароль."""
     await read_json(request)
@@ -358,6 +453,7 @@ async def ws_handler(request: web.Request):
                 if user:
                     peer.name, peer.login = display_name(user), user["login"]
                     peer.admin, peer.guest = bool(user["is_admin"]), False
+                    peer.profile = load_profile(user)
                 elif not peer.guest or not msg.get("guest"):
                     await peer.send({"type": "error", "message": "Сессия закончилась — войдите в аккаунт заново"})
                     continue
@@ -366,6 +462,8 @@ async def ws_handler(request: web.Request):
                     if err:
                         await peer.send({"type": "error", "message": err})
                         continue
+                    prof, perr = clean_profile(msg.get("profile"))   # профиль гостя живёт в его браузере
+                    peer.profile = dict(EMPTY_PROFILE) if perr else prof
                 row = await open_room(user, str(msg.get("room", "")).strip()[:MAX_ROOM],
                                       str(msg.get("password", ""))[:128], ip)
                 if isinstance(row, str):
@@ -396,6 +494,21 @@ async def ws_handler(request: web.Request):
                     peer.state = {k: bool(v) for k, v in st.items() if k in ("muted", "deafened", "sharing", "camera")}
                     await broadcast(peer.room, {"type": "state", "id": peer.id, "state": peer.state},
                                     exclude=peer.id)
+
+            elif kind == "profile" and peer.room:
+                if time.time() - peer.renamed_at < 2:
+                    await peer.send({"type": "error", "message": "Не так часто — подождите пару секунд"})
+                    continue
+                peer.renamed_at = time.time()
+                user = None if peer.guest else current_user(request)
+                if not peer.guest and not user:
+                    await peer.send({"type": "error", "message": "Сессия закончилась — войдите в аккаунт заново"})
+                    continue
+                name, prof, err = await save_profile(user, msg)
+                if err:
+                    await peer.send({"type": "error", "message": err})
+                    continue
+                await push_profile(live_peers_of(user["login"]) if user else [peer], name, prof)
 
             elif kind == "rename" and peer.room:
                 if time.time() - peer.renamed_at < 2:
@@ -583,6 +696,7 @@ def main():
     app.router.add_post("/api/register", api_register)
     app.router.add_post("/api/login", api_login)
     app.router.add_post("/api/logout", api_logout)
+    app.router.add_post("/api/profile", api_profile)
     app.router.add_get("/api/rooms", api_rooms)
     app.router.add_post(r"/api/rooms/{id:\d{1,12}}/delete", api_room_delete)
     app.router.add_post(r"/api/rooms/{id:\d{1,12}}/forget", api_room_forget)
